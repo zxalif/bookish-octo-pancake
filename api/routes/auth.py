@@ -423,9 +423,21 @@ async def verify_email(
     }
 
 
+class ResendVerificationRequest(BaseModel):
+    """Resend verification email request model."""
+    email: EmailStr
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "user@example.com"
+            }
+        }
+
+
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
 async def resend_verification_email(
-    email: EmailStr,
+    request: ResendVerificationRequest,
     db: Session = Depends(get_db)
 ):
     """
@@ -441,7 +453,7 @@ async def resend_verification_email(
     """
     from services.email_service import EmailService
     
-    user = AuthService.get_user_by_email(email, db)
+    user = AuthService.get_user_by_email(request.email, db)
     
     if user and not user.is_verified:
         # Generate new verification token and send email

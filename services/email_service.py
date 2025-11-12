@@ -32,16 +32,64 @@ class EmailService:
         """
         Create SMTP connection.
         
+        Supports both STARTTLS (port 587) and SSL (port 465) connections.
+        Handles production environment differences.
+        
         Returns:
             SMTP connection object
+            
+        Raises:
+            ValueError: If SMTP configuration is incomplete
+            smtplib.SMTPException: If connection or authentication fails
         """
         if not settings.SMTP_HOST or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
             raise ValueError("SMTP configuration is incomplete. Check SMTP_HOST, SMTP_USER, and SMTP_PASSWORD.")
         
-        server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
-        server.starttls()
-        server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-        return server
+        host = settings.SMTP_HOST
+        port = settings.SMTP_PORT
+        user = settings.SMTP_USER
+        password = settings.SMTP_PASSWORD
+        
+        logger.info(f"Connecting to SMTP server: {host}:{port} as {user}")
+        
+        try:
+            # Use SSL for port 465, STARTTLS for port 587
+            if port == 465:
+                logger.debug("Using SSL connection (port 465)")
+                server = smtplib.SMTP_SSL(host, port, timeout=30)
+            else:
+                logger.debug("Using STARTTLS connection (port 587 or other)")
+                server = smtplib.SMTP(host, port, timeout=30)
+                # Enable debug for troubleshooting (comment out in production if too verbose)
+                # server.set_debuglevel(1)
+                server.starttls()
+            
+            logger.debug("SMTP connection established, attempting login...")
+            server.login(user, password)
+            logger.info("SMTP authentication successful")
+            
+            return server
+            
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(
+                f"SMTP authentication failed for {user} at {host}:{port}. "
+                f"Error code: {e.smtp_code}, Error: {e.smtp_error}. "
+                f"Possible causes: 1) Wrong credentials, 2) IP not whitelisted, "
+                f"3) Account requires app password, 4) Account locked/suspended"
+            )
+            raise
+        except smtplib.SMTPConnectError as e:
+            logger.error(
+                f"Failed to connect to SMTP server {host}:{port}. "
+                f"Error: {e}. Check firewall/network settings."
+            )
+            raise
+        except Exception as e:
+            logger.error(
+                f"Unexpected error connecting to SMTP {host}:{port}: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            raise
     
     @staticmethod
     def _send_email(
@@ -87,10 +135,25 @@ class EmailService:
             
             # Send email
             server = EmailService._create_smtp_connection()
-            server.send_message(msg)
-            server.quit()
+            try:
+                server.send_message(msg)
+                logger.info(f"Email sent successfully to {to_email} (subject: {subject})")
+                return True
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass  # Ignore errors when closing connection
             
-            return True
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(
+                f"SMTP authentication failed when sending to {to_email}. "
+                f"This might be due to: 1) IP restrictions on email provider (PrivateEmail may block VPS IPs), "
+                f"2) Different network in production vs localhost, 3) Account security settings, "
+                f"4) Need to whitelist VPS IP in email provider settings. "
+                f"Error code: {e.smtp_code}, Error: {e.smtp_error}"
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {str(e)}", exc_info=True)
             return False

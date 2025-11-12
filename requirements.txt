@@ -12,7 +12,7 @@ psycopg2-binary==2.9.10
 # Authentication
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.1.2  # Explicit bcrypt version to avoid version detection issues
+bcrypt==4.0.1  # Use 4.0.1 to avoid passlib version detection issues with 4.1.x
 python-multipart==0.0.12
 
 # Payment Gateway (Paddle - PRIMARY)
