@@ -1,0 +1,176 @@
+# Docker Compose for FreelanceHunt Backend (lead-api)
+# Standalone backend service with PostgreSQL and Redis
+# Port: 7300
+
+version: '3.8'
+
+services:
+  # ===== Backend API Service =====
+  lead-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freelancehunt-api
+    ports:
+      - "7300:7300"
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://freelancehunt:freelancehunt123@postgres:5432/freelancehunt
+      
+      # JWT Authentication
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - ALGORITHM=HS256
+      - ACCESS_TOKEN_EXPIRE_MINUTES=1440
+      
+      # Paddle Payment Gateway (PRIMARY)
+      - PADDLE_API_KEY=${PADDLE_API_KEY:-}
+      - PADDLE_VENDOR_ID=${PADDLE_VENDOR_ID:-}
+      - PADDLE_ENVIRONMENT=${PADDLE_ENVIRONMENT:-sandbox}
+      - PADDLE_WEBHOOK_SECRET=${PADDLE_WEBHOOK_SECRET:-}
+      
+      # Rixly API Integration (for lead generation)
+      # IMPORTANT: In Docker, use container name (rixly-api) and internal port (8000)
+      # Make sure .env has: RIXLY_API_URL=http://rixly-api:8000 (not localhost:7101)
+      - RIXLY_API_URL=${RIXLY_API_URL:-http://rixly-api:8000}
+      - RIXLY_API_KEY=${RIXLY_API_KEY:-dev_api_key}
+      
+      # Email Configuration
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@freelancehunt.com}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-ClientHunt}
+      - SMTP_NOREPLY_EMAIL=${SMTP_NOREPLY_EMAIL:-noreply@clienthunt.app}
+      - SMTP_WELCOME_EMAIL=${SMTP_WELCOME_EMAIL:-welcome@clienthunt.app}
+      
+      # API Configuration
+      - API_URL=http://localhost:7300
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:9100}
+      
+      # Redis Cache
+      - REDIS_URL=redis://redis:6379
+      
+      # Application Settings
+      - DEBUG=${DEBUG:-True}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=${LOG_FILE:-logs/app.log}
+      # Monitoring (Sentry)
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - SENTRY_ENABLED=${SENTRY_ENABLED:-false}
+      # Auto-run migrations on startup (set to "true" to enable)
+      - AUTO_RUN_MIGRATIONS=${AUTO_RUN_MIGRATIONS:-false}
+      # Python settings for hot reload
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      # Mount source code for development (hot reload)
+      - .:/app
+      # Exclude node_modules and venv (these are not needed in container)
+      - /app/venv
+      - /app/__pycache__
+      - /app/.pytest_cache
+      - /app/.mypy_cache
+      # Logs volume
+      - api_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - freelancehunt-backend-network
+      - rixly-network  # Connect to Rixly's network for API communication
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7300/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ===== PostgreSQL Database =====
+  postgres:
+    image: postgres:16-alpine
+    container_name: freelancehunt-postgres
+    environment:
+      - POSTGRES_DB=freelancehunt
+      - POSTGRES_USER=freelancehunt
+      - POSTGRES_PASSWORD=freelancehunt123
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Optional: Mount init scripts
+      # - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - freelancehunt-backend-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freelancehunt -d freelancehunt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===== Redis Cache =====
+  redis:
+    image: redis:7-alpine
+    container_name: freelancehunt-redis
+    # Only add password if REDIS_PASSWORD is set (optional for development)
+    command: >
+      sh -c "
+      if [ -n \"$$REDIS_PASSWORD\" ]; then
+        redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\"
+      else
+        redis-server --appendonly yes
+      fi
+      "
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - freelancehunt-backend-network
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        sh -c "
+        if [ -n \"$$REDIS_PASSWORD\" ]; then
+          redis-cli -a \"$$REDIS_PASSWORD\" ping
+        else
+          redis-cli ping
+        fi
+        "
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+# ===== Networks =====
+networks:
+  freelancehunt-backend-network:
+    driver: bridge
+    name: freelancehunt-backend-network
+  # External network for Rixly API communication
+  # Note: Network name depends on Rixly's docker-compose project name
+  # If Rixly is in directory 'rixly', network will be 'rixly_rixly-network'
+  # Adjust the name below if your Rixly project uses a different name
+  rixly-network:
+    external: true
+    name: rixly_rixly-network  # Change this if Rixly uses different project name
+
+# ===== Volumes =====
+volumes:
+  postgres_data:
+    driver: local
+    name: freelancehunt-postgres-data
+  redis_data:
+    driver: local
+    name: freelancehunt-redis-data
+  api_logs:
+    driver: local
+    name: freelancehunt-api-logs
+

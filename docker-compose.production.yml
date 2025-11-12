@@ -1,0 +1,107 @@
+# Docker Compose for ClientHunt Backend (lead-api) - PRODUCTION
+# Uses native PostgreSQL and Redis (not Docker containers)
+# Port: 7300
+#
+# IMPORTANT: This file is for production deployment on VPS
+# - Uses host network mode (localhost works directly)
+# - Uses native PostgreSQL on host (via localhost)
+# - Uses native Redis on host (via localhost)
+# - No source code mounting (production build)
+# - Resource limits configured
+#
+# NETWORK MODE: host
+# - Container shares host's network stack
+# - localhost in container = host's localhost
+# - Simpler configuration, no host.docker.internal needed
+# - No port mapping needed (uses host ports directly)
+
+services:
+  # ===== Backend API Service =====
+  lead-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    container_name: clienthunt-api
+    network_mode: host  # Use host network - localhost works directly!
+    environment:
+      # Database (Native PostgreSQL on host)
+      - DATABASE_URL=${DATABASE_URL}
+      
+      # JWT Authentication
+      - SECRET_KEY=${SECRET_KEY}
+      - ALGORITHM=HS256
+      - ACCESS_TOKEN_EXPIRE_MINUTES=1440
+      
+      # Paddle Payment Gateway
+      - PADDLE_API_KEY=${PADDLE_API_KEY}
+      - PADDLE_VENDOR_ID=${PADDLE_VENDOR_ID}
+      - PADDLE_ENVIRONMENT=${PADDLE_ENVIRONMENT:-live}
+      - PADDLE_WEBHOOK_SECRET=${PADDLE_WEBHOOK_SECRET}
+      
+      # Rixly API Integration
+      # localhost works because we're using host network mode!
+      - RIXLY_API_URL=${RIXLY_API_URL:-http://localhost:8000}
+      - RIXLY_API_KEY=${RIXLY_API_KEY}
+      
+      # Email Configuration
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-ClientHunt}
+      - SMTP_NOREPLY_EMAIL=${SMTP_NOREPLY_EMAIL}
+      - SMTP_WELCOME_EMAIL=${SMTP_WELCOME_EMAIL}
+      
+      # API Configuration
+      - API_URL=${API_URL:-https://api.clienthunt.app}
+      - FRONTEND_URL=${FRONTEND_URL:-https://clienthunt.app}
+      
+      # CORS Configuration
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://clienthunt.app,https://www.clienthunt.app}
+      
+      # Redis Cache (Native Redis on host)
+      - REDIS_URL=${REDIS_URL}
+      
+      # Application Settings
+      - DEBUG=False
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/app/logs/app.log
+      
+      # Monitoring (Sentry)
+      - SENTRY_DSN=${SENTRY_DSN}
+      - SENTRY_ENABLED=${SENTRY_ENABLED:-true}
+      
+      # Auto-run migrations on startup
+      - AUTO_RUN_MIGRATIONS=${AUTO_RUN_MIGRATIONS:-true}
+      
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      # Logs volume
+      - api_logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7300/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+# ===== Volumes =====
+# NOTE: No networks section needed with host network mode
+volumes:
+  api_logs:
+    driver: local
+    name: clienthunt-api-logs
+

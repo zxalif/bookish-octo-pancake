@@ -1,0 +1,45 @@
+Generic single-database configuration for Alembic.
+
+## Usage
+
+### Create a new migration
+
+```bash
+alembic revision --autogenerate -m "description of changes"
+```
+
+### Apply migrations
+
+```bash
+# Upgrade to latest
+alembic upgrade head
+
+# Upgrade one version
+alembic upgrade +1
+
+# Downgrade one version
+alembic downgrade -1
+```
+
+### View migration history
+
+```bash
+alembic history
+alembic current
+```
+
+### Initial Setup
+
+The initial migration has been created with all models:
+- User
+- Subscription
+- Payment
+- UsageMetric
+- KeywordSearch
+- Opportunity
+
+To apply the initial migration:
+
+```bash
+alembic upgrade head
+```
