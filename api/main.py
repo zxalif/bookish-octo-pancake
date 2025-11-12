@@ -1,7 +1,7 @@
 """
-FreelanceHunt API - Main Application
+ClientHunt API - Main Application
 
-FastAPI application entry point for the FreelanceHunt SaaS platform.
+FastAPI application entry point for the ClientHunt SaaS platform.
 Handles authentication, subscriptions, payments, and opportunity management.
 
 Port: 7300

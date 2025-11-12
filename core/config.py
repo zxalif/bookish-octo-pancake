@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     """
     
     # Application
-    APP_NAME: str = "FreelanceHunt"
+    APP_NAME: str = "ClientHunt"
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = True
     ENVIRONMENT: str = "development"

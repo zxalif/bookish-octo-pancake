@@ -178,7 +178,7 @@ class EmailService:
         
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
         
-        subject = "Reset Your FreelanceHunt Password"
+        subject = "Reset Your ClientHunt Password"
         html_body = f"""
         <html>
           <body>
@@ -235,14 +235,14 @@ class EmailService:
         }
         plan_name = plan_names.get(plan_id, plan_id)
         
-        subject = f"Welcome to FreelanceHunt {plan_name} Plan!"
+        subject = f"Welcome to ClientHunt {plan_name} Plan!"
         html_body = f"""
         <html>
           <body>
             <h2>Subscription Activated</h2>
             <p>Your {plan_name} subscription has been activated!</p>
             <p>You now have access to all features of the {plan_name} plan.</p>
-            <p>Thank you for choosing FreelanceHunt!</p>
+            <p>Thank you for choosing ClientHunt!</p>
           </body>
         </html>
         """
@@ -252,7 +252,7 @@ class EmailService:
         Your {plan_name} subscription has been activated!
         You now have access to all features of the {plan_name} plan.
         
-        Thank you for choosing FreelanceHunt!
+        Thank you for choosing ClientHunt!
         """
         
         return EmailService._send_email(user.email, subject, html_body, text_body)
@@ -286,7 +286,7 @@ class EmailService:
         
         percentage = int((current_usage / limit) * 100) if limit > 0 else 0
         
-        subject = f"FreelanceHunt Usage Warning - {percentage}% Used"
+        subject = f"ClientHunt Usage Warning - {percentage}% Used"
         html_body = f"""
         <html>
           <body>
