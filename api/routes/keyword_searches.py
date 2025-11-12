@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from uuid import UUID
 
 from core.database import get_db
+from core.config import settings
 from api.dependencies import get_current_user, require_active_subscription
 from models.user import User
 from models.subscription import Subscription
@@ -143,6 +144,21 @@ async def create_keyword_search(
     **Response 402**: Concurrent keyword search limit reached
     **Response 401**: Not authenticated
     """
+    # Validate keywords and subreddits limits
+    if len(search_data.keywords) > settings.MAX_KEYWORDS_PER_SEARCH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {settings.MAX_KEYWORDS_PER_SEARCH} keywords allowed per search. "
+                   f"Received {len(search_data.keywords)} keywords."
+        )
+    
+    if search_data.subreddits and len(search_data.subreddits) > settings.MAX_SUBREDDITS_PER_SEARCH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {settings.MAX_SUBREDDITS_PER_SEARCH} subreddits allowed per search. "
+                   f"Received {len(search_data.subreddits)} subreddits."
+        )
+    
     # Check concurrent keyword search limit (active + soft-deleted this month)
     concurrent_allowed, concurrent_count, concurrent_limit = SubscriptionService.check_usage_limit(
         user_id=current_user.id,
@@ -465,6 +481,23 @@ async def update_keyword_search(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Keyword search not found"
         )
+    
+    # Validate keywords and subreddits limits if provided
+    if search_data.keywords is not None:
+        if len(search_data.keywords) > settings.MAX_KEYWORDS_PER_SEARCH:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Maximum {settings.MAX_KEYWORDS_PER_SEARCH} keywords allowed per search. "
+                       f"Received {len(search_data.keywords)} keywords."
+            )
+    
+    if search_data.subreddits is not None:
+        if len(search_data.subreddits) > settings.MAX_SUBREDDITS_PER_SEARCH:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Maximum {settings.MAX_SUBREDDITS_PER_SEARCH} subreddits allowed per search. "
+                       f"Received {len(search_data.subreddits)} subreddits."
+            )
     
     # Update fields if provided
     if search_data.name is not None:

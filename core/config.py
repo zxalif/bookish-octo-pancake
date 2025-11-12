@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     ENVIRONMENT: str = "development"
     
+    # Keyword Search Limits
+    MAX_KEYWORDS_PER_SEARCH: int = 20
+    MAX_SUBREDDITS_PER_SEARCH: int = 15
+    
     # API Configuration
     API_URL: str = "http://localhost:7300"
     FRONTEND_URL: str = "http://localhost:9100"
@@ -207,3 +211,7 @@ def get_settings() -> Settings:
         Settings: Application settings instance
     """
     return Settings()
+
+
+# Export settings instance for convenience
+settings = get_settings()
