@@ -1,4 +1,4 @@
 """
-Test package for FreelanceHunt backend API.
+Test package for ClientHunt backend API.
 """
 

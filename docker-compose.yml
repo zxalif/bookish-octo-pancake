@@ -1,4 +1,4 @@
-# Docker Compose for FreelanceHunt Backend (lead-api)
+# Docker Compose for ClientHunt Backend (lead-api)
 # Standalone backend service with PostgreSQL and Redis
 # Port: 7300
 

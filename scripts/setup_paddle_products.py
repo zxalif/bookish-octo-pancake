@@ -222,7 +222,7 @@ class PaddleSetup:
     
     async def setup_all_products(self) -> Dict[str, Dict[str, str]]:
         """
-        Create all products and prices for FreelanceHunt.
+        Create all products and prices for ClientHunt.
         
         Returns:
             dict: Dictionary mapping plan names to price IDs (monthly and yearly)
@@ -259,7 +259,7 @@ class PaddleSetup:
             
             # Create product
             product = await self.create_product(
-                name=f"FreelanceHunt {plan_data['name']}",
+                name=f"ClientHunt {plan_data['name']}",
                 description=plan_data['description']
             )
             product_id = product.get("id")

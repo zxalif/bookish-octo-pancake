@@ -1,6 +1,6 @@
-# FreelanceHunt Backend API
+# ClientHunt Backend API
 
-**FastAPI Backend for FreelanceHunt - Reddit-First Lead Generation Platform for Freelancers**
+**FastAPI Backend for ClientHunt - Reddit-First Lead Generation Platform for Freelancers**
 
 ---
 

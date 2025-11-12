@@ -1,7 +1,7 @@
 """
 User Model
 
-Represents a user account in the FreelanceHunt platform.
+Represents a user account in the ClientHunt platform.
 """
 
 from sqlalchemy import Column, String, Boolean, Index

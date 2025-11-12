@@ -1,5 +1,5 @@
 """
-FreelanceHunt API Package
+ClientHunt API Package
 
 This package contains all API routes, middleware, and dependencies.
 """

@@ -1,4 +1,4 @@
-# Backend Dockerfile for FreelanceHunt API
+# Backend Dockerfile for ClientHunt API
 # Port: 7300
 
 FROM python:3.11-slim

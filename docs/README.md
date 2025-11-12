@@ -1,6 +1,6 @@
 # Backend Documentation
 
-Complete documentation for the FreelanceHunt backend API.
+Complete documentation for the ClientHunt backend API.
 
 ---
 
