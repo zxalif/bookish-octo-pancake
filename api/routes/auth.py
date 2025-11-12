@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.logger import get_logger
-from services.auth_service import AuthService
+from services.auth_service import AuthService, redis_client
 from services.subscription_service import SubscriptionService
+from services.email_service import EmailService
 from api.dependencies import get_current_user
 from models.user import User
 from core.security import get_password_hash
@@ -108,7 +109,6 @@ async def register(
         SubscriptionService.create_free_subscription(user.id, db)
         
         # Generate verification token and send verification email
-        from services.email_service import EmailService
         verification_token = AuthService.generate_email_verification_token(user.id)
         await EmailService.send_verification_email(user.email, user.id, verification_token)
         
@@ -347,9 +347,6 @@ async def verify_email(
     
     **Response 400**: Invalid or expired token
     """
-    from services.email_service import EmailService
-    from services.subscription_service import SubscriptionService
-    
     # First, get the user by user_id to check if they exist
     user_by_id = AuthService.get_user_by_id(verify_data.user_id, db)
     
@@ -371,7 +368,6 @@ async def verify_email(
     
     if not user:
         # Check if Redis is available
-        from services.auth_service import redis_client
         if not redis_client:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -451,8 +447,6 @@ async def resend_verification_email(
     
     **Response 200**: Success message (always returns success for security)
     """
-    from services.email_service import EmailService
-    
     user = AuthService.get_user_by_email(request.email, db)
     
     if user and not user.is_verified:

@@ -16,6 +16,8 @@ from fastapi import HTTPException, status
 from models.user import User
 from models.subscription import Subscription, SubscriptionStatus, SubscriptionPlan
 from models.price import BillingPeriod
+from models.keyword_search import KeywordSearch
+from models.usage_metric import UsageMetric
 from services.price_service import PriceService
 from core.config import get_settings
 
@@ -134,9 +136,6 @@ class SubscriptionService:
         if metric_type == "keyword_searches":
             # CONCURRENT limit - count active + soft-deleted searches in current month
             # This prevents abuse: deleted searches still count until next month
-            from models.keyword_search import KeywordSearch
-            from datetime import datetime, timedelta
-            
             # Get current month period
             now = datetime.utcnow()
             month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -155,9 +154,6 @@ class SubscriptionService:
             ).count()
         elif metric_type == "keyword_searches_created_per_month":
             # MONTHLY creation limit - track total searches created this month
-            from models.usage_metric import UsageMetric
-            from datetime import datetime, timedelta
-            
             # Get current period (monthly)
             now = datetime.utcnow()
             period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -173,9 +169,6 @@ class SubscriptionService:
             current_count = usage_metric.count if usage_metric else 0
         else:
             # MONTHLY limit - get from usage metrics
-            from models.usage_metric import UsageMetric
-            from datetime import datetime
-            
             # Get current period (monthly)
             now = datetime.utcnow()
             period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)

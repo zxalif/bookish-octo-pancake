@@ -10,7 +10,11 @@ from sqlalchemy import desc
 
 from models.support_thread import SupportThread, ThreadStatus
 from models.support_message import SupportMessage, MessageSender
+from models.user import User
 from services.email_service import EmailService
+from core.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class SupportService:
@@ -103,7 +107,6 @@ class SupportService:
         
         # Send email notification to user
         try:
-            from models.user import User
             user = db.query(User).filter(User.id == user_id).first()
             if user:
                 EmailService.send_support_thread_created_email(
@@ -114,8 +117,6 @@ class SupportService:
                 )
         except Exception as e:
             # Log error but don't fail the request
-            from core.logger import get_logger
-            logger = get_logger(__name__)
             logger.error(f"Failed to send support notification email: {str(e)}", exc_info=True)
         
         return thread

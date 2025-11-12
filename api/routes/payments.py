@@ -10,9 +10,13 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from core.database import get_db
+from core.logger import get_logger
 from api.dependencies import get_current_user
 from models.user import User
+from models.payment import Payment
 from services.payment_service import PaymentService
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -86,8 +90,6 @@ async def create_paddle_checkout(
         # Re-raise HTTPExceptions (already formatted with proper error structure)
         raise
     except Exception as e:
-        from core.logger import get_logger
-        logger = get_logger(__name__)
         logger.error(f"Unexpected error in create_paddle_checkout: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -177,8 +179,6 @@ async def get_payment_history(
     
     **Response 401**: Not authenticated
     """
-    from models.payment import Payment
-    
     payments = db.query(Payment).filter(
         Payment.user_id == current_user.id
     ).order_by(Payment.created_at.desc()).all()
@@ -209,8 +209,6 @@ async def get_payment(
     **Response 404**: Payment not found or doesn't belong to user
     **Response 401**: Not authenticated
     """
-    from models.payment import Payment
-    
     payment = db.query(Payment).filter(
         Payment.id == payment_id,
         Payment.user_id == current_user.id

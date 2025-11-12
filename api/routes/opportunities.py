@@ -24,6 +24,7 @@ from models.opportunity import Opportunity, OpportunityStatus
 from models.keyword_search import KeywordSearch
 from services.opportunity_service import OpportunityService
 from services.job_service import JobService, JobStatus
+from services.subscription_service import SubscriptionService
 
 logger = get_logger(__name__)
 
@@ -441,7 +442,6 @@ async def generate_opportunities(
         )
     
     # Check opportunity limit
-    from services.subscription_service import SubscriptionService
     allowed, current, limit_count = SubscriptionService.check_usage_limit(
         user_id=current_user.id,
         metric_type="opportunities_per_month",
@@ -616,10 +616,6 @@ async def export_opportunities_csv(
     
     **Response 401**: Not authenticated
     """
-    import csv
-    from io import StringIO
-    from fastapi.responses import StreamingResponse
-    
     # Build query (same as list_opportunities)
     query = db.query(Opportunity).filter(Opportunity.user_id == current_user.id)
     

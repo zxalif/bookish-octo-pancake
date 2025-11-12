@@ -16,9 +16,10 @@ import secrets
 import redis
 
 from models.user import User
-from core.security import verify_password, get_password_hash, create_access_token, create_refresh_token
+from core.security import verify_password, get_password_hash, create_access_token, create_refresh_token, decode_refresh_token
 from core.config import get_settings
 from core.logger import get_logger
+from services.email_service import EmailService
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -154,8 +155,6 @@ class AuthService:
         Raises:
             HTTPException: If refresh token is invalid or expired
         """
-        from core.security import decode_refresh_token
-        
         # Decode refresh token
         payload = decode_refresh_token(refresh_token)
         if payload is None:
@@ -337,8 +336,6 @@ class AuthService:
         Returns:
             bool: True if email sent successfully
         """
-        from services.email_service import EmailService
-        
         user = AuthService.get_user_by_email(email, db)
         if not user:
             # Don't reveal if user exists (security)

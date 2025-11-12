@@ -9,11 +9,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.logger import get_logger
 from api.dependencies import get_current_user
 from models.user import User
 from models.support_thread import SupportThread
 from models.support_message import SupportMessage
 from services.support_service import SupportService
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -88,8 +91,6 @@ async def get_support_threads(
         return [thread.to_dict() for thread in threads]
     except Exception as e:
         # Log the actual error for debugging
-        from core.logger import get_logger
-        logger = get_logger(__name__)
         logger.error(f"Error fetching support threads: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

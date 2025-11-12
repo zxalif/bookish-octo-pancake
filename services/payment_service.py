@@ -203,8 +203,6 @@ class PaymentService:
                     user_message = user_friendly_messages.get(error_code, error_detail)
                     
                     # Log the full error for debugging
-                    from core.logger import get_logger
-                    logger = get_logger(__name__)
                     logger.error(
                         f"Paddle API error: code={error_code}, type={error_type}, detail={error_detail}, "
                         f"status={response.status_code}, environment={settings.PADDLE_ENVIRONMENT}, "

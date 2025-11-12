@@ -17,6 +17,7 @@ from models.subscription import Subscription
 from models.keyword_search import KeywordSearch
 from services.subscription_service import SubscriptionService
 from services.opportunity_service import OpportunityService
+from services.usage_service import UsageService
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -188,7 +189,6 @@ async def create_keyword_search(
     db.refresh(keyword_search)
     
     # Track monthly creation count
-    from services.usage_service import UsageService
     UsageService.increment_usage(
         user_id=current_user.id,
         subscription_id=subscription.id,

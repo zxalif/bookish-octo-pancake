@@ -19,6 +19,8 @@ import hashlib
 from core.config import get_settings
 from core.logger import get_logger
 from sqlalchemy.orm import Session
+from models.user import User
+# Note: AuthService imported locally in send_password_reset_email to avoid circular import
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -227,9 +229,6 @@ class EmailService:
         Returns:
             bool: True if sent successfully
         """
-        from models.user import User
-        from services.auth_service import AuthService
-        
         user = db.query(User).filter(User.email == email).first()
         if not user:
             # Don't reveal if email exists (security best practice)
@@ -237,6 +236,8 @@ class EmailService:
         
         # Generate reset token if not provided
         if not token:
+            # Import locally to avoid circular import with auth_service
+            from services.auth_service import AuthService
             token = AuthService.generate_password_reset_token(user.id)
         
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
@@ -285,8 +286,6 @@ class EmailService:
         Returns:
             bool: True if sent successfully
         """
-        from models.user import User
-        
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return False
@@ -341,8 +340,6 @@ class EmailService:
         Returns:
             bool: True if sent successfully
         """
-        from models.user import User
-        
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return False
