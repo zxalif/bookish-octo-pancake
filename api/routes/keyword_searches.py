@@ -62,16 +62,20 @@ class KeywordSearchUpdate(BaseModel):
 class KeywordSearchResponse(BaseModel):
     """Keyword search response model."""
     id: str
-    user_id: str
     name: str
     keywords: List[str]
     patterns: List[str]
     subreddits: List[str]
     platforms: List[str]
     enabled: bool
-    last_run_at: str | None
     created_at: str
     updated_at: str
+    
+    # Removed fields:
+    # - user_id: Not needed (user already authenticated via JWT)
+    # - last_run_at: Not used by frontend
+    # - zola_search_id: Internal Rixly ID, should not be exposed
+    # - deleted_at: Internal soft-delete timestamp, should not be exposed
 
 
 @router.get("/", response_model=List[KeywordSearchResponse])
@@ -109,7 +113,21 @@ async def list_keyword_searches(
     
     searches = query.order_by(KeywordSearch.created_at.desc()).all()
     
-    return [search.to_dict() for search in searches]
+    # Use Pydantic model to ensure only expected fields are returned
+    return [
+        KeywordSearchResponse(
+            id=search.id,
+            name=search.name,
+            keywords=search.keywords,
+            patterns=search.patterns or [],
+            subreddits=search.subreddits or [],
+            platforms=search.platforms or ["reddit"],
+            enabled=search.enabled,
+            created_at=search.created_at.isoformat() if search.created_at else "",
+            updated_at=search.updated_at.isoformat() if search.updated_at else "",
+        )
+        for search in searches
+    ]
 
 
 @router.post("/", response_model=KeywordSearchResponse, status_code=status.HTTP_201_CREATED)
@@ -227,7 +245,18 @@ async def create_keyword_search(
         logger.warning(f"Failed to create search in Rixly (will retry on generate): {str(e)}")
         # Continue without rixly_search_id - it will be created when generating opportunities
     
-    return keyword_search.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned
+    return KeywordSearchResponse(
+        id=keyword_search.id,
+        name=keyword_search.name,
+        keywords=keyword_search.keywords,
+        patterns=keyword_search.patterns or [],
+        subreddits=keyword_search.subreddits or [],
+        platforms=keyword_search.platforms or ["reddit"],
+        enabled=keyword_search.enabled,
+        created_at=keyword_search.created_at.isoformat() if keyword_search.created_at else "",
+        updated_at=keyword_search.updated_at.isoformat() if keyword_search.updated_at else "",
+    )
 
 
 @router.get("/{search_id}", response_model=KeywordSearchResponse)
@@ -261,7 +290,18 @@ async def get_keyword_search(
             detail="Keyword search not found"
         )
     
-    return search.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned
+    return KeywordSearchResponse(
+        id=search.id,
+        name=search.name,
+        keywords=search.keywords,
+        patterns=search.patterns or [],
+        subreddits=search.subreddits or [],
+        platforms=search.platforms or ["reddit"],
+        enabled=search.enabled,
+        created_at=search.created_at.isoformat() if search.created_at else "",
+        updated_at=search.updated_at.isoformat() if search.updated_at else "",
+    )
 
 
 @router.get("/{search_id}/leads-count")
@@ -563,7 +603,18 @@ async def update_keyword_search(
     db.commit()
     db.refresh(search)
     
-    return search.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned
+    return KeywordSearchResponse(
+        id=search.id,
+        name=search.name,
+        keywords=search.keywords,
+        patterns=search.patterns or [],
+        subreddits=search.subreddits or [],
+        platforms=search.platforms or ["reddit"],
+        enabled=search.enabled,
+        created_at=search.created_at.isoformat() if search.created_at else "",
+        updated_at=search.updated_at.isoformat() if search.updated_at else "",
+    )
 
 
 @router.delete("/{search_id}", status_code=status.HTTP_204_NO_CONTENT)

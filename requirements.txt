@@ -44,6 +44,9 @@ pytest-cov==6.0.0
 # Monitoring
 sentry-sdk[fastapi]==2.0.0
 
+# Rate Limiting
+slowapi==0.1.9
+
 # Code Quality (optional)
 black==24.10.0
 flake8==7.1.1

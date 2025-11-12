@@ -43,6 +43,23 @@ class CheckoutResponse(BaseModel):
     customer_id: Optional[str] = None
 
 
+class PaymentResponse(BaseModel):
+    """Payment response model."""
+    id: str
+    subscription_id: str | None
+    amount: int  # Amount in cents
+    currency: str
+    status: str
+    payment_method: str | None
+    created_at: str
+    updated_at: str
+    
+    # Removed fields:
+    # - user_id: Not needed (user already authenticated via JWT)
+    # - paddle_transaction_id: Internal Paddle ID, not used by frontend
+    # - paddle_invoice_id: Internal Paddle ID, not used by frontend
+
+
 @router.post("/paddle/create-checkout", response_model=CheckoutResponse)
 async def create_paddle_checkout(
     checkout_data: CheckoutCreate,
@@ -183,13 +200,28 @@ async def get_payment_history(
         Payment.user_id == current_user.id
     ).order_by(Payment.created_at.desc()).all()
     
+    # Use Pydantic model to ensure only expected fields are returned
+    payment_responses = [
+        PaymentResponse(
+            id=payment.id,
+            subscription_id=payment.subscription_id,
+            amount=payment.amount,
+            currency=payment.currency,
+            status=payment.status.value,
+            payment_method=payment.payment_method,
+            created_at=payment.created_at.isoformat() if payment.created_at else "",
+            updated_at=payment.updated_at.isoformat() if payment.updated_at else "",
+        )
+        for payment in payments
+    ]
+    
     return {
         "total": len(payments),
-        "payments": [payment.to_dict() for payment in payments]
+        "payments": payment_responses
     }
 
 
-@router.get("/{payment_id}")
+@router.get("/{payment_id}", response_model=PaymentResponse)
 async def get_payment(
     payment_id: str,
     current_user: User = Depends(get_current_user),
@@ -220,4 +252,14 @@ async def get_payment(
             detail="Payment not found"
         )
     
-    return payment.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned
+    return PaymentResponse(
+        id=payment.id,
+        subscription_id=payment.subscription_id,
+        amount=payment.amount,
+        currency=payment.currency,
+        status=payment.status.value,
+        payment_method=payment.payment_method,
+        created_at=payment.created_at.isoformat() if payment.created_at else "",
+        updated_at=payment.updated_at.isoformat() if payment.updated_at else "",
+    )

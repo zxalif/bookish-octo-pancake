@@ -4,9 +4,10 @@ User Model
 Represents a user account in the ClientHunt platform.
 """
 
-from sqlalchemy import Column, String, Boolean, Index
+from sqlalchemy import Column, String, Boolean, Index, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from typing import Optional
+from datetime import datetime
 
 from core.database import Base
 from models.base import generate_uuid, TimestampMixin
@@ -54,6 +55,18 @@ class User(Base, TimestampMixin):
     # Payment Integration
     paddle_customer_id = Column(String(255), nullable=True, index=True)
     
+    # GDPR/CCPA Consent Tracking
+    consent_data_processing = Column(Boolean, default=False, nullable=False)
+    consent_marketing = Column(Boolean, default=False, nullable=False)
+    consent_cookies = Column(Boolean, default=False, nullable=False)
+    consent_data_processing_at = Column(DateTime, nullable=True)
+    consent_marketing_at = Column(DateTime, nullable=True)
+    consent_cookies_at = Column(DateTime, nullable=True)
+    
+    # IP Address Tracking
+    registration_ip = Column(String(45), nullable=True)  # IPv6 max length is 45 chars
+    last_login_ip = Column(String(45), nullable=True)
+    
     # Relationships
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")
@@ -61,6 +74,7 @@ class User(Base, TimestampMixin):
     keyword_searches = relationship("KeywordSearch", back_populates="user", cascade="all, delete-orphan")
     opportunities = relationship("Opportunity", back_populates="user", cascade="all, delete-orphan")
     support_threads = relationship("SupportThread", back_populates="user", cascade="all, delete-orphan")
+    audit_logs = relationship("UserAuditLog", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(id={self.id}, email={self.email})>"
@@ -81,7 +95,7 @@ class User(Base, TimestampMixin):
         Convert user to dictionary (excluding sensitive data).
         
         Returns:
-            dict: User data without password
+            dict: User data without password, IP addresses, and other sensitive info
         """
         return {
             "id": self.id,
@@ -91,4 +105,6 @@ class User(Base, TimestampMixin):
             "is_verified": self.is_verified,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            # Note: IP addresses and consent details are excluded for privacy
+            # Consent data can be added to a separate endpoint if needed for user preferences
         }

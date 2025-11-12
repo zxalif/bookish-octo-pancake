@@ -7,12 +7,14 @@ Handles authentication, subscriptions, payments, and opportunity management.
 Port: 7300
 """
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 
 from core.config import get_settings
 from core.logger import get_logger, setup_logging
+from api.middleware.rate_limit import limiter, _rate_limit_exceeded_handler
 from api.routes import auth, users, subscriptions, payments, keyword_searches, opportunities, usage, prices, cleanup, support
 
 # Initialize centralized logging (must be done before importing routes)
@@ -55,13 +57,18 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
+# Attach rate limiter to app state (for backward compatibility if needed)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Configure CORS
+# SECURITY: Restrict methods and headers to only what's needed
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],  # Only needed methods
+    allow_headers=["Content-Type", "Authorization", "X-Service-Token"],  # Only needed headers
 )
 
 
@@ -170,6 +177,12 @@ async def startup_event():
     Application startup event handler.
     Initializes connections and services.
     """
+    # SECURITY: Fail fast if DEBUG is enabled in production
+    if settings.ENVIRONMENT == "production" and settings.DEBUG:
+        logger.critical("SECURITY ERROR: DEBUG=True in production environment!")
+        logger.critical("This will leak sensitive error information. Set DEBUG=False immediately.")
+        raise RuntimeError("DEBUG must be False in production. Check your environment variables.")
+    
     logger.info(f"Starting {settings.APP_NAME} API v{settings.APP_VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     logger.info(f"API URL: {settings.API_URL}")

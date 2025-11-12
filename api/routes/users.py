@@ -4,13 +4,15 @@ User Routes
 Handles user profile management and user-related operations.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
+from slowapi.util import get_remote_address
 
 from core.database import get_db
 from api.dependencies import get_current_user
 from models.user import User
+from models.user_audit_log import UserAuditLog
 from services.auth_service import AuthService
 from services.subscription_service import SubscriptionService
 
@@ -101,6 +103,7 @@ async def get_current_user_info(
 
 @router.put("/me", response_model=UserResponse)
 async def update_current_user(
+    request: Request,
     user_update: UserUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -162,7 +165,20 @@ async def update_current_user(
         # Basic sanitization (remove excessive whitespace)
         full_name = ' '.join(full_name.split())
         
+        old_full_name = current_user.full_name
         current_user.full_name = full_name
+        
+        # Create audit log entry for profile update
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="update_profile",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Full name updated from '{old_full_name}' to '{full_name}'"
+        )
+        db.add(audit_log)
     
     # Validate that at least one field is being updated
     if user_update.full_name is None:

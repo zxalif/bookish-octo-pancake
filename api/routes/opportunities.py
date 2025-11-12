@@ -5,7 +5,7 @@ Handles opportunity management (renamed from "leads" for freelancer focus).
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ import asyncio
 from core.database import get_db
 from core.logger import get_logger
 from api.dependencies import get_current_user, require_active_subscription
+from api.middleware.rate_limit import limiter
 from models.user import User
 from models.subscription import Subscription
 from models.opportunity import Opportunity, OpportunityStatus
@@ -41,7 +42,6 @@ class OpportunityUpdate(BaseModel):
 class OpportunityResponse(BaseModel):
     """Opportunity response model."""
     id: str
-    user_id: str
     keyword_search_id: str
     source_post_id: str
     source: str
@@ -62,6 +62,8 @@ class OpportunityResponse(BaseModel):
     notes: str | None
     created_at: str
     updated_at: str
+    
+    # Removed: user_id - Not needed (user already authenticated via JWT, never used by frontend)
 
 
 class PaginatedOpportunitiesResponse(BaseModel):
@@ -144,9 +146,37 @@ async def list_opportunities(
     # Pagination
     opportunities = query.offset(offset).limit(limit).all()
     
+    # Convert to response models (exclude user_id)
+    items = [
+        OpportunityResponse(
+            id=opp.id,
+            keyword_search_id=opp.keyword_search_id,
+            source_post_id=opp.source_post_id,
+            source=opp.source,
+            source_type=opp.source_type,
+            title=opp.title,
+            content=opp.content,
+            author=opp.author,
+            url=opp.url,
+            matched_keywords=opp.matched_keywords,
+            detected_pattern=opp.detected_pattern,
+            opportunity_type=opp.opportunity_type,
+            opportunity_subtype=opp.opportunity_subtype,
+            relevance_score=opp.relevance_score,
+            urgency_score=opp.urgency_score,
+            total_score=opp.total_score,
+            extracted_info=opp.extracted_info,
+            status=opp.status.value,
+            notes=opp.notes,
+            created_at=opp.created_at.isoformat() if opp.created_at else "",
+            updated_at=opp.updated_at.isoformat() if opp.updated_at else "",
+        )
+        for opp in opportunities
+    ]
+    
     # Return with pagination metadata
     return {
-        "items": [opp.to_dict() for opp in opportunities],
+        "items": items,
         "total": total_count,
         "limit": limit,
         "offset": offset,
@@ -188,7 +218,30 @@ async def get_opportunity(
             detail="Opportunity not found"
         )
     
-    return opportunity.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned (exclude user_id)
+    return OpportunityResponse(
+        id=opportunity.id,
+        keyword_search_id=opportunity.keyword_search_id,
+        source_post_id=opportunity.source_post_id,
+        source=opportunity.source,
+        source_type=opportunity.source_type,
+        title=opportunity.title,
+        content=opportunity.content,
+        author=opportunity.author,
+        url=opportunity.url,
+        matched_keywords=opportunity.matched_keywords,
+        detected_pattern=opportunity.detected_pattern,
+        opportunity_type=opportunity.opportunity_type,
+        opportunity_subtype=opportunity.opportunity_subtype,
+        relevance_score=opportunity.relevance_score,
+        urgency_score=opportunity.urgency_score,
+        total_score=opportunity.total_score,
+        extracted_info=opportunity.extracted_info,
+        status=opportunity.status.value,
+        notes=opportunity.notes,
+        created_at=opportunity.created_at.isoformat() if opportunity.created_at else "",
+        updated_at=opportunity.updated_at.isoformat() if opportunity.updated_at else "",
+    )
 
 
 @router.patch("/{opportunity_id}", response_model=OpportunityResponse)
@@ -247,7 +300,30 @@ async def update_opportunity(
     db.commit()
     db.refresh(opportunity)
     
-    return opportunity.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned (exclude user_id)
+    return OpportunityResponse(
+        id=opportunity.id,
+        keyword_search_id=opportunity.keyword_search_id,
+        source_post_id=opportunity.source_post_id,
+        source=opportunity.source,
+        source_type=opportunity.source_type,
+        title=opportunity.title,
+        content=opportunity.content,
+        author=opportunity.author,
+        url=opportunity.url,
+        matched_keywords=opportunity.matched_keywords,
+        detected_pattern=opportunity.detected_pattern,
+        opportunity_type=opportunity.opportunity_type,
+        opportunity_subtype=opportunity.opportunity_subtype,
+        relevance_score=opportunity.relevance_score,
+        urgency_score=opportunity.urgency_score,
+        total_score=opportunity.total_score,
+        extracted_info=opportunity.extracted_info,
+        status=opportunity.status.value,
+        notes=opportunity.notes,
+        created_at=opportunity.created_at.isoformat() if opportunity.created_at else "",
+        updated_at=opportunity.updated_at.isoformat() if opportunity.updated_at else "",
+    )
 
 
 @router.delete("/{opportunity_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -385,7 +461,9 @@ async def process_opportunity_generation(
 
 
 @router.post("/generate", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("10/minute")
 async def generate_opportunities(
+    request: Request,
     keyword_search_id: str = Query(..., description="Keyword search UUID to generate opportunities for"),
     limit: int = Query(100, ge=1, le=500, description="Maximum opportunities to generate"),
     force_refresh: bool = Query(False, description="Force new scrape even if leads exist (respects cooldown)"),
@@ -401,6 +479,8 @@ async def generate_opportunities(
     1. Creates a background job and returns immediately
     2. Processes scraping and opportunity generation in background
     3. User can poll /api/v1/opportunities/generate/{job_id}/status for progress
+    
+    **SECURITY**: Rate limited to 10 requests per minute per IP to prevent abuse.
     
     **Authentication Required**: Yes (JWT token)
     **Subscription Required**: Yes (active subscription)
@@ -422,7 +502,9 @@ async def generate_opportunities(
     **Response 402**: Monthly opportunity limit reached
     **Response 404**: Keyword search not found
     **Response 400**: Keyword search is disabled
+    **Response 429**: Rate limit exceeded
     """
+    
     # Validate keyword search
     keyword_search = db.query(KeywordSearch).filter(
         KeywordSearch.id == keyword_search_id,
@@ -711,7 +793,35 @@ async def export_opportunities_json(
     
     opportunities = query.order_by(Opportunity.created_at.desc()).all()
     
+    # Convert to response models (exclude user_id)
+    opportunity_responses = [
+        OpportunityResponse(
+            id=opp.id,
+            keyword_search_id=opp.keyword_search_id,
+            source_post_id=opp.source_post_id,
+            source=opp.source,
+            source_type=opp.source_type,
+            title=opp.title,
+            content=opp.content,
+            author=opp.author,
+            url=opp.url,
+            matched_keywords=opp.matched_keywords,
+            detected_pattern=opp.detected_pattern,
+            opportunity_type=opp.opportunity_type,
+            opportunity_subtype=opp.opportunity_subtype,
+            relevance_score=opp.relevance_score,
+            urgency_score=opp.urgency_score,
+            total_score=opp.total_score,
+            extracted_info=opp.extracted_info,
+            status=opp.status.value,
+            notes=opp.notes,
+            created_at=opp.created_at.isoformat() if opp.created_at else "",
+            updated_at=opp.updated_at.isoformat() if opp.updated_at else "",
+        )
+        for opp in opportunities
+    ]
+    
     return {
         "total": len(opportunities),
-        "opportunities": [opp.to_dict() for opp in opportunities]
+        "opportunities": opportunity_responses
     }

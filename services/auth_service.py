@@ -39,15 +39,23 @@ class AuthService:
         email: str,
         password: str,
         full_name: str,
-        db: Session
+        consent_data_processing: bool,
+        consent_marketing: bool,
+        consent_cookies: bool,
+        registration_ip: str | None = None,
+        db: Session = None
     ) -> User:
         """
-        Register a new user.
+        Register a new user with consent tracking.
         
         Args:
             email: User's email address
             password: Plain text password
             full_name: User's full name
+            consent_data_processing: GDPR consent for data processing
+            consent_marketing: Consent for marketing emails
+            consent_cookies: Consent for cookies
+            registration_ip: IP address from registration
             db: Database session
             
         Returns:
@@ -56,6 +64,9 @@ class AuthService:
         Raises:
             HTTPException: If email already exists
         """
+        from fastapi import HTTPException, status
+        from datetime import datetime
+        
         # Check if user already exists
         existing_user = db.query(User).filter(User.email == email).first()
         if existing_user:
@@ -64,18 +75,28 @@ class AuthService:
                 detail="Email already registered"
             )
         
-        # Create new user
+        now = datetime.utcnow()
+        
+        # Create new user with consent tracking
         user = User(
             email=email,
             password_hash=get_password_hash(password),
             full_name=full_name,
             is_active=True,
-            is_verified=False  # Email verification can be added later
+            is_verified=False,  # Email verification required
+            # Consent tracking
+            consent_data_processing=consent_data_processing,
+            consent_marketing=consent_marketing,
+            consent_cookies=consent_cookies,
+            consent_data_processing_at=now if consent_data_processing else None,
+            consent_marketing_at=now if consent_marketing else None,
+            consent_cookies_at=now if consent_cookies else None,
+            # IP tracking
+            registration_ip=registration_ip
         )
         
         db.add(user)
-        db.commit()
-        db.refresh(user)
+        db.flush()  # Flush to get user.id without committing
         
         return user
     

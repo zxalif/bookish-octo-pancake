@@ -21,15 +21,18 @@ router = APIRouter()
 class SubscriptionResponse(BaseModel):
     """Subscription response model."""
     id: str
-    user_id: str
     plan: str
     status: str
-    paddle_subscription_id: str | None
     current_period_start: str | None
     current_period_end: str | None
     cancel_at_period_end: bool
     created_at: str
     updated_at: str
+    
+    # Removed fields:
+    # - user_id: Not needed (user already authenticated via JWT)
+    # - paddle_subscription_id: Internal Paddle ID, not used by frontend
+    # - price_id: Internal price reference, not needed
 
 
 class SubscriptionCreate(BaseModel):
@@ -69,7 +72,17 @@ async def get_current_subscription(
         # Auto-create free subscription for new users (3-month free tier)
         subscription = SubscriptionService.create_free_subscription(current_user.id, db)
     
-    return subscription.to_dict()
+    # Use Pydantic model to ensure only expected fields are returned
+    return SubscriptionResponse(
+        id=subscription.id,
+        plan=subscription.plan.value,
+        status=subscription.status.value,
+        current_period_start=subscription.current_period_start.isoformat() if subscription.current_period_start else None,
+        current_period_end=subscription.current_period_end.isoformat() if subscription.current_period_end else None,
+        cancel_at_period_end=subscription.cancel_at_period_end,
+        created_at=subscription.created_at.isoformat() if subscription.created_at else "",
+        updated_at=subscription.updated_at.isoformat() if subscription.updated_at else "",
+    )
 
 
 @router.get("/history", response_model=list[SubscriptionResponse])
@@ -91,7 +104,20 @@ async def get_subscription_history(
         Subscription.user_id == current_user.id
     ).order_by(Subscription.created_at.desc()).all()
     
-    return [sub.to_dict() for sub in subscriptions]
+    # Use Pydantic model to ensure only expected fields are returned
+    return [
+        SubscriptionResponse(
+            id=sub.id,
+            plan=sub.plan.value,
+            status=sub.status.value,
+            current_period_start=sub.current_period_start.isoformat() if sub.current_period_start else None,
+            current_period_end=sub.current_period_end.isoformat() if sub.current_period_end else None,
+            cancel_at_period_end=sub.cancel_at_period_end,
+            created_at=sub.created_at.isoformat() if sub.created_at else "",
+            updated_at=sub.updated_at.isoformat() if sub.updated_at else "",
+        )
+        for sub in subscriptions
+    ]
 
 
 @router.post("/create", response_model=SubscriptionResponse, status_code=status.HTTP_201_CREATED)
@@ -134,7 +160,17 @@ async def create_subscription(
                 db=db
             )
         
-        return subscription.to_dict()
+        # Use Pydantic model to ensure only expected fields are returned
+        return SubscriptionResponse(
+            id=subscription.id,
+            plan=subscription.plan.value,
+            status=subscription.status.value,
+            current_period_start=subscription.current_period_start.isoformat() if subscription.current_period_start else None,
+            current_period_end=subscription.current_period_end.isoformat() if subscription.current_period_end else None,
+            cancel_at_period_end=subscription.cancel_at_period_end,
+            created_at=subscription.created_at.isoformat() if subscription.created_at else "",
+            updated_at=subscription.updated_at.isoformat() if subscription.updated_at else "",
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -177,9 +213,21 @@ async def cancel_subscription(
         db=db
     )
     
+    # Use Pydantic model to ensure only expected fields are returned
+    subscription_response = SubscriptionResponse(
+        id=cancelled.id,
+        plan=cancelled.plan.value,
+        status=cancelled.status.value,
+        current_period_start=cancelled.current_period_start.isoformat() if cancelled.current_period_start else None,
+        current_period_end=cancelled.current_period_end.isoformat() if cancelled.current_period_end else None,
+        cancel_at_period_end=cancelled.cancel_at_period_end,
+        created_at=cancelled.created_at.isoformat() if cancelled.created_at else "",
+        updated_at=cancelled.updated_at.isoformat() if cancelled.updated_at else "",
+    )
+    
     return {
         "message": "Subscription cancelled successfully",
-        "subscription": cancelled.to_dict()
+        "subscription": subscription_response
     }
 
 

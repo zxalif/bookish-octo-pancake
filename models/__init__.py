@@ -5,6 +5,7 @@ Contains all SQLAlchemy models for the application.
 """
 
 from models.user import User
+from models.user_audit_log import UserAuditLog
 from models.subscription import Subscription, SubscriptionPlan, SubscriptionStatus
 from models.payment import Payment, PaymentStatus
 from models.usage_metric import UsageMetric
@@ -17,6 +18,7 @@ from models.base import generate_uuid, TimestampMixin, SoftDeleteMixin
 
 __all__ = [
     "User",
+    "UserAuditLog",
     "Subscription",
     "SubscriptionPlan",
     "SubscriptionStatus",

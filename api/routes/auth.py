@@ -4,10 +4,12 @@ Authentication Routes
 Handles user registration, login, and password reset.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
+from slowapi.util import get_remote_address
+from datetime import datetime
 
 from core.database import get_db
 from core.logger import get_logger
@@ -16,7 +18,9 @@ from services.subscription_service import SubscriptionService
 from services.email_service import EmailService
 from api.dependencies import get_current_user
 from models.user import User
+from models.user_audit_log import UserAuditLog
 from core.security import get_password_hash
+from api.middleware.rate_limit import limiter
 
 logger = get_logger(__name__)
 
@@ -30,13 +34,19 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     full_name: str
+    consent_data_processing: bool
+    consent_marketing: bool
+    consent_cookies: bool
     
     class Config:
         json_schema_extra = {
             "example": {
                 "email": "user@example.com",
                 "password": "securepassword123",
-                "full_name": "John Doe"
+                "full_name": "John Doe",
+                "consent_data_processing": True,
+                "consent_marketing": False,
+                "consent_cookies": True
             }
         }
 
@@ -75,7 +85,9 @@ class UserResponse(BaseModel):
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
 async def register(
+    request: Request,
     user_data: UserRegister,
     db: Session = Depends(get_db)
 ):
@@ -84,6 +96,8 @@ async def register(
     
     Creates a new user account, sends verification email, and returns an access token.
     Note: User must verify their email before full access is granted.
+    
+    **SECURITY**: Rate limited to 5 requests per minute per IP to prevent abuse.
     
     **Request Body**:
     - email: User's email address (must be unique)
@@ -96,14 +110,47 @@ async def register(
     - user: User information (is_verified will be False until email is verified)
     
     **Response 400**: Email already registered
+    **Response 429**: Rate limit exceeded
     """
     try:
+        # Get IP address from request
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        # Validate required consents (GDPR/CCPA compliance)
+        if not user_data.consent_data_processing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Data processing consent is required to create an account"
+            )
+        if not user_data.consent_cookies:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cookie consent is required to use our service"
+            )
+        
+        # Register user with consent and IP
+        now = datetime.utcnow()
         user = AuthService.register_user(
             email=user_data.email,
             password=user_data.password,
             full_name=user_data.full_name,
+            consent_data_processing=user_data.consent_data_processing,
+            consent_marketing=user_data.consent_marketing,
+            consent_cookies=user_data.consent_cookies,
+            registration_ip=ip_address,
             db=db
         )
+        
+        # Create audit log entry for registration
+        audit_log = UserAuditLog(
+            user_id=user.id,
+            action="register",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"User registered with consents: data_processing={user_data.consent_data_processing}, marketing={user_data.consent_marketing}, cookies={user_data.consent_cookies}"
+        )
+        db.add(audit_log)
         
         # Auto-create free subscription for new user (1-month free tier)
         SubscriptionService.create_free_subscription(user.id, db)
@@ -111,6 +158,8 @@ async def register(
         # Generate verification token and send verification email
         verification_token = AuthService.generate_email_verification_token(user.id)
         await EmailService.send_verification_email(user.email, user.id, verification_token)
+        
+        db.commit()
         
         token_data = AuthService.create_token_for_user(user)
         
@@ -125,7 +174,9 @@ async def register(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("10/minute")
 async def login(
+    request: Request,
     credentials: UserLogin,
     db: Session = Depends(get_db)
 ):
@@ -134,6 +185,8 @@ async def login(
     
     Authenticates user with email and password, returns access token.
     Requires email verification for access.
+    
+    **SECURITY**: Rate limited to 10 requests per minute per IP to prevent brute force attacks.
     
     **Request Body**:
     - email: User's email address
@@ -145,7 +198,12 @@ async def login(
     - user: User information
     
     **Response 401**: Invalid credentials or email not verified
+    **Response 429**: Rate limit exceeded
     """
+    # Get IP address from request
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
     user = AuthService.authenticate_user(
         email=credentials.email,
         password=credentials.password,
@@ -165,6 +223,18 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email not verified. Please check your email and verify your account before logging in.",
         )
+    
+    # Update last login IP and create audit log
+    user.last_login_ip = ip_address
+    audit_log = UserAuditLog(
+        user_id=user.id,
+        action="login",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details="User logged in successfully"
+    )
+    db.add(audit_log)
+    db.commit()
     
     return AuthService.create_token_for_user(user)
 
@@ -188,9 +258,23 @@ async def get_current_user_info(
     return current_user.to_dict()
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Forgot password request model."""
+    email: EmailStr
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "user@example.com"
+            }
+        }
+
+
 @router.post("/forgot-password")
+@limiter.limit("5/minute")
 async def forgot_password(
-    email: EmailStr,
+    request: Request,
+    forgot_data: ForgotPasswordRequest,
     db: Session = Depends(get_db)
 ):
     """
@@ -199,15 +283,37 @@ async def forgot_password(
     Sends a password reset email to the user if the email exists.
     Always returns success to prevent email enumeration attacks.
     
+    **SECURITY**: Rate limited to 5 requests per minute per IP to prevent abuse.
+    
     **Request Body**:
     - email: User's email address
     
     **Response 200**: Success message (always returns success for security)
+    **Response 429**: Rate limit exceeded
     
     **Note**: Requires SMTP configuration in environment variables.
     """
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
+    # Get user if exists (for audit logging)
+    user = AuthService.get_user_by_email(forgot_data.email, db)
+    
     # Send reset email if user exists (but don't reveal if they don't)
-    await AuthService.send_password_reset_email(email, db)
+    email_sent = await AuthService.send_password_reset_email(forgot_data.email, db)
+    
+    # Create audit log entry if user exists
+    if user:
+        audit_log = UserAuditLog(
+            user_id=user.id,
+            action="forgot_password",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Password reset requested for email: {forgot_data.email}"
+        )
+        db.add(audit_log)
+        db.commit()
     
     # Always return success to prevent email enumeration
     return {
@@ -230,7 +336,9 @@ class PasswordResetRequest(BaseModel):
 
 
 @router.post("/reset-password")
+@limiter.limit("5/minute")
 async def reset_password(
+    request: Request,
     reset_data: PasswordResetRequest,
     db: Session = Depends(get_db)
 ):
@@ -240,6 +348,8 @@ async def reset_password(
     Validates the reset token and updates the user's password.
     Token must be used within 1 hour and can only be used once.
     
+    **SECURITY**: Rate limited to 5 requests per minute per IP to prevent abuse.
+    
     **Request Body**:
     - token: Password reset token from email
     - new_password: New password
@@ -247,7 +357,12 @@ async def reset_password(
     **Response 200**: Success message
     
     **Response 400**: Invalid or expired token
+    **Response 429**: Rate limit exceeded
     """
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
     # Verify token and get user
     user = AuthService.verify_password_reset_token(reset_data.token, db)
     
@@ -259,6 +374,16 @@ async def reset_password(
     
     # Update password
     user.password_hash = get_password_hash(reset_data.new_password)
+    
+    # Create audit log entry for password reset
+    audit_log = UserAuditLog(
+        user_id=user.id,
+        action="reset_password",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details="Password reset completed successfully"
+    )
+    db.add(audit_log)
     db.commit()
     
     return {

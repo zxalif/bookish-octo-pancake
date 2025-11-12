@@ -240,7 +240,8 @@ class EmailService:
             from services.auth_service import AuthService
             token = AuthService.generate_password_reset_token(user.id)
         
-        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+        # Include user_id in URL for better UX (frontend can pre-fill if needed)
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}&user_id={user.id}"
         
         subject = "Reset Your ClientHunt Password"
         html_body = f"""
