@@ -563,10 +563,16 @@ class OpportunityService:
             # Cooldown passed - automatically attempt refresh for one-time searches
             # This allows users to get fresh leads without explicitly using force_refresh
             should_attempt_refresh = True
-            logger.info(
-                f"Cooldown passed ({time_since_last_minutes:.1f} min since last scrape). "
-                f"Will automatically attempt to refresh leads for {rixly_search_id}."
-            )
+            if time_since_last_minutes is not None:
+                logger.info(
+                    f"Cooldown passed ({time_since_last_minutes:.1f} min since last scrape). "
+                    f"Will automatically attempt to refresh leads for {rixly_search_id}."
+                )
+            else:
+                logger.info(
+                    f"Cooldown passed (never scraped before). "
+                    f"Will automatically attempt to refresh leads for {rixly_search_id}."
+                )
         else:
             # Cooldown still active - check if leads exist to use them
             try:
@@ -577,11 +583,18 @@ class OpportunityService:
                 )
                 existing_leads_count = len(existing_leads) if existing_leads else 0
                 if existing_leads_count > 0:
-                    logger.info(
-                        f"Found {existing_leads_count}+ existing leads for {rixly_search_id}. "
-                        f"Cooldown still active ({time_since_last_minutes:.1f} min). "
-                        f"Will use existing leads (fast response)."
-                    )
+                    if time_since_last_minutes is not None:
+                        logger.info(
+                            f"Found {existing_leads_count}+ existing leads for {rixly_search_id}. "
+                            f"Cooldown still active ({time_since_last_minutes:.1f} min). "
+                            f"Will use existing leads (fast response)."
+                        )
+                    else:
+                        logger.info(
+                            f"Found {existing_leads_count}+ existing leads for {rixly_search_id}. "
+                            f"Cooldown still active. "
+                            f"Will use existing leads (fast response)."
+                        )
                 else:
                     # No leads exist - should scrape
                     should_attempt_refresh = True
@@ -629,11 +642,18 @@ class OpportunityService:
                 logger.warning(f"Failed to trigger scrape (continuing anyway): {str(e)}")
                 # Don't fail if scrape trigger fails - might have existing leads
         else:
-            logger.info(
-                f"Skipping scrape trigger for {rixly_search_id} - existing leads found "
-                f"and cooldown still active ({time_since_last_minutes:.1f} min). "
-                f"Will use existing leads for fast response."
-            )
+            if time_since_last_minutes is not None:
+                logger.info(
+                    f"Skipping scrape trigger for {rixly_search_id} - existing leads found "
+                    f"and cooldown still active ({time_since_last_minutes:.1f} min). "
+                    f"Will use existing leads for fast response."
+                )
+            else:
+                logger.info(
+                    f"Skipping scrape trigger for {rixly_search_id} - existing leads found "
+                    f"and cooldown still active. "
+                    f"Will use existing leads for fast response."
+                )
         
         # Step 5: Wait for scraping to complete (or poll for results)
         # Scraping can take 15-60+ seconds (Reddit API + AI analysis)
