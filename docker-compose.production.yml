@@ -64,6 +64,7 @@ services:
       - REDIS_URL=${REDIS_URL}
       
       # Application Settings
+      - APP_NAME=ClientHunt
       - DEBUG=False
       - ENVIRONMENT=production
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
