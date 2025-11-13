@@ -12,6 +12,7 @@ from typing import Optional
 from core.database import get_db
 from core.logger import get_logger
 from api.dependencies import get_current_user
+from api.middleware.rate_limit import limiter
 from models.user import User
 from models.payment import Payment
 from services.payment_service import PaymentService
@@ -61,7 +62,9 @@ class PaymentResponse(BaseModel):
 
 
 @router.post("/paddle/create-checkout", response_model=CheckoutResponse)
+@limiter.limit("10/minute")
 async def create_paddle_checkout(
+    request: Request,
     checkout_data: CheckoutCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -71,6 +74,8 @@ async def create_paddle_checkout(
     
     This endpoint creates a checkout session with Paddle and returns a checkout URL
     that the user can redirect to for payment.
+    
+    **SECURITY**: Rate limited to 10 requests per minute per IP to prevent abuse.
     
     **Authentication Required**: Yes (JWT token)
     
@@ -84,6 +89,7 @@ async def create_paddle_checkout(
     
     **Response 400**: Invalid plan
     **Response 401**: Not authenticated
+    **Response 429**: Rate limit exceeded
     **Response 502**: Paddle API error
     """
     try:

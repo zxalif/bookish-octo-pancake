@@ -13,6 +13,7 @@ from models.support_message import SupportMessage, MessageSender
 from models.user import User
 from services.email_service import EmailService
 from core.logger import get_logger
+from core.sanitization import sanitize_subject, sanitize_message
 
 logger = get_logger(__name__)
 
@@ -85,10 +86,14 @@ class SupportService:
         Returns:
             Created support thread
         """
+        # SECURITY: Sanitize user input to prevent XSS attacks
+        sanitized_subject = sanitize_subject(subject)
+        sanitized_message = sanitize_message(message)
+        
         # Create thread
         thread = SupportThread(
             user_id=user_id,
-            subject=subject,
+            subject=sanitized_subject,
             status=ThreadStatus.OPEN
         )
         db.add(thread)
@@ -97,7 +102,7 @@ class SupportService:
         # Create initial message
         initial_message = SupportMessage(
             thread_id=thread.id,
-            content=message,
+            content=sanitized_message,
             sender=MessageSender.USER,
             read=True  # User's own message is read
         )
@@ -153,10 +158,13 @@ class SupportService:
         if thread.status == ThreadStatus.CLOSED:
             raise ValueError("Cannot send messages to a closed thread. Please create a new support request.")
         
+        # SECURITY: Sanitize user input to prevent XSS attacks
+        sanitized_content = sanitize_message(content)
+        
         # Create message
         message = SupportMessage(
             thread_id=thread_id,
-            content=content,
+            content=sanitized_content,
             sender=MessageSender.USER,
             read=True  # User's own message is read
         )

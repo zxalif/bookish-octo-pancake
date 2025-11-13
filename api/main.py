@@ -72,6 +72,111 @@ app.add_middleware(
 )
 
 
+# Request Size Limit Middleware
+# SECURITY: Limit request body size to prevent DoS attacks
+MAX_REQUEST_SIZE = settings.MAX_REQUEST_SIZE_MB * 1024 * 1024  # Convert MB to bytes
+
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    """
+    Limit request body size to prevent DoS attacks.
+    
+    Checks Content-Length header and enforces maximum request size.
+    Rejects requests that exceed the limit before processing.
+    
+    Note: This middleware checks the Content-Length header. For chunked transfer
+    encoding or streaming requests without Content-Length, additional protection
+    should be configured at the reverse proxy/load balancer level (e.g., Nginx).
+    
+    Args:
+        request: Incoming HTTP request
+        call_next: Next middleware/route handler
+        
+    Returns:
+        Response: HTTP response
+        
+    Raises:
+        HTTPException: 413 Payload Too Large if request exceeds limit
+    """
+    # Check Content-Length header if present
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            size = int(content_length)
+            if size > MAX_REQUEST_SIZE:
+                client_ip = request.client.host if request.client else "unknown"
+                logger.warning(
+                    f"Request rejected: Content-Length {size} bytes exceeds limit {MAX_REQUEST_SIZE} bytes. "
+                    f"IP: {client_ip}, Path: {request.url.path}"
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": f"Request body too large. Maximum size is {settings.MAX_REQUEST_SIZE_MB}MB",
+                        "error_code": "payload_too_large",
+                        "max_size_mb": settings.MAX_REQUEST_SIZE_MB
+                    }
+                )
+        except ValueError:
+            # Invalid Content-Length header, let it through (will be caught by FastAPI validation)
+            pass
+    
+    # For requests without Content-Length (chunked transfer encoding, streaming),
+    # the body size is checked by FastAPI/Uvicorn during parsing.
+    # Additional protection should be configured at the reverse proxy level (Nginx).
+    response = await call_next(request)
+    return response
+
+
+# Security Headers Middleware
+# SECURITY: Add security headers to all responses
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """
+    Add security headers to all HTTP responses.
+    
+    Headers added:
+    - Strict-Transport-Security: Enforce HTTPS
+    - X-Content-Type-Options: Prevent MIME type sniffing
+    - X-Frame-Options: Prevent clickjacking
+    - X-XSS-Protection: Enable XSS filter
+    - Referrer-Policy: Control referrer information
+    """
+    response = await call_next(request)
+    
+    # Only add HSTS in production (HTTPS required)
+    if settings.ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+    
+    # Prevent MIME type sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    
+    # Prevent clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+    
+    # Enable XSS filter (legacy browsers)
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    
+    # Control referrer information
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    # Content Security Policy (basic - can be enhanced per route if needed)
+    # Note: CSP is complex and may need adjustment based on frontend requirements
+    # For now, we'll keep it permissive but can tighten later
+    if settings.ENVIRONMENT == "production":
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "  # unsafe-eval needed for some libs
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "font-src 'self' data:; "
+            "connect-src 'self' https:; "
+            "frame-ancestors 'none';"
+        )
+    
+    return response
+
+
 # Health check endpoint
 @app.get("/health", tags=["Health"])
 async def health_check():

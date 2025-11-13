@@ -5,7 +5,7 @@ Handles opportunity generation by integrating with Rixly API.
 Converts Rixly "leads" to SaaS "opportunities" with user isolation.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from datetime import datetime
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
@@ -164,6 +164,84 @@ class OpportunityService:
             )
     
     @staticmethod
+    async def update_keyword_search_in_rixly(
+        rixly_search_id: str,
+        keyword_search: KeywordSearch
+    ) -> bool:
+        """
+        Update a keyword search in Rixly API.
+        
+        Args:
+            rixly_search_id: Rixly keyword search ID
+            keyword_search: KeywordSearch model from SaaS database with updated values
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+            
+        Raises:
+            HTTPException: If API call fails
+        """
+        api_url = OpportunityService.get_rixly_api_url()
+        headers = OpportunityService.get_rixly_headers()
+        
+        # Prepare payload for Rixly API
+        # Rixly expects reddit_config with subreddits array
+        subreddits = keyword_search.subreddits or ["forhire", "hiring", "freelance"]
+        
+        # Build webhook URL for SaaS API to receive notifications from Rixly
+        # Only set webhook for scheduled searches (one-time searches don't need webhooks)
+        scraping_mode = getattr(keyword_search, 'scraping_mode', 'one_time')
+        webhook_url = None
+        if scraping_mode == "scheduled":
+            from core.config import get_settings
+            settings = get_settings()
+            # Webhook URL points to SaaS API endpoint that will handle notifications
+            webhook_url = f"{settings.API_URL}/api/v1/opportunities/webhook/rixly"
+        
+        payload = {
+            "name": keyword_search.name,
+            "keywords": keyword_search.keywords,
+            "patterns": keyword_search.patterns or ["looking for", "need", "hiring", "want"],
+            "platforms": keyword_search.platforms or ["reddit"],
+            "reddit_config": {
+                "subreddits": subreddits,
+                "limit": 100,
+                "include_comments": True,
+                "sort": "new",
+                "time_filter": "day"
+            },
+            "scraping_mode": scraping_mode,
+            "scraping_interval": getattr(keyword_search, 'scraping_interval', None),
+            "enabled": keyword_search.enabled,
+            "webhook_url": webhook_url  # Set webhook URL for scheduled searches
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.put(
+                    f"{api_url}/api/v1/keyword-searches/{rixly_search_id}",
+                    headers=headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                
+                logger.info(f"Updated keyword search in Rixly: {rixly_search_id}")
+                return True
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Rixly API error updating search: {e.response.text}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Rixly API error: {e.response.text}"
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Failed to connect to Rixly: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to connect to Rixly API: {str(e)}"
+            )
+    
+    @staticmethod
     async def check_rixly_search_exists(rixly_search_id: str) -> bool:
         """
         Check if a keyword search exists in Rixly.
@@ -239,6 +317,11 @@ class OpportunityService:
                     status_info["last_scrape_at"] = data.get("last_scrape_at")
                     status_info["time_since_last_minutes"] = data.get("time_since_last_minutes")
                     status_info["cooldown_remaining"] = data.get("cooldown_remaining")
+                    
+                    # Extract elapsed time for progress estimation
+                    status_info["elapsed_seconds"] = data.get("elapsed_seconds")
+                    if not status_info["elapsed_seconds"] and job_info:
+                        status_info["elapsed_seconds"] = job_info.get("elapsed_seconds")
                     
                     return status_info
                 return {"status": "idle"}
@@ -454,7 +537,8 @@ class OpportunityService:
         subscription_id: str,
         db: Session,
         limit: int = 100,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        progress_callback: Optional[Callable[[int, str], None]] = None
     ) -> Dict[str, Any]:
         """
         Generate opportunities from Rixly API for a keyword search.
@@ -517,8 +601,13 @@ class OpportunityService:
         # Reuse existing rixly_search_id if available (stored in zola_search_id column for backward compatibility)
         rixly_search_id = keyword_search.zola_search_id  # Keep column name for DB compatibility
         
+        if progress_callback:
+            progress_callback(15, "Preparing search...")
+        
         if not rixly_search_id:
             # Create new search in Rixly
+            if progress_callback:
+                progress_callback(20, "Setting up search configuration...")
             try:
                 rixly_search_id = await OpportunityService.create_keyword_search_in_rixly(keyword_search)
                 # Store rixly_search_id for future reuse (using zola_search_id column)
@@ -538,6 +627,8 @@ class OpportunityService:
         
         # Step 2: Check scrape status and determine if we should refresh
         # For one-time searches, we should auto-refresh after cooldown passes
+        if progress_callback:
+            progress_callback(25, "Checking for new opportunities...")
         scrape_status = await OpportunityService.check_rixly_scrape_status(rixly_search_id)
         status_value = scrape_status.get("status", "idle")
         is_scraping = status_value in ["processing", "running"]
@@ -566,12 +657,23 @@ class OpportunityService:
         )
         
         if force_refresh:
-            # Force refresh - always attempt to trigger scrape
-            should_attempt_refresh = True
-            logger.info(
-                f"force_refresh=True: Will attempt to trigger new scrape for {rixly_search_id} "
-                f"(respects cooldown period)"
-            )
+            # Force refresh - check cooldown first before attempting
+            if not cooldown_passed:
+                # Cooldown still active - cannot force refresh
+                remaining_minutes = COOLDOWN_MINUTES - (time_since_last_minutes or 0)
+                cooldown_message = f"Cooldown active. Wait {remaining_minutes:.1f} more minutes before forcing refresh."
+                logger.info(
+                    f"force_refresh=True but cooldown still active ({time_since_last_minutes:.1f} min). "
+                    f"Cannot force refresh. {cooldown_message}"
+                )
+                # Don't attempt refresh - will use existing leads
+                should_attempt_refresh = False
+            else:
+                # Cooldown passed - can force refresh
+                should_attempt_refresh = True
+                logger.info(
+                    f"force_refresh=True: Cooldown passed. Will attempt to trigger new scrape for {rixly_search_id}"
+                )
         elif cooldown_passed:
             # Cooldown passed - automatically attempt refresh for one-time searches
             # This allows users to get fresh leads without explicitly using force_refresh
@@ -631,6 +733,8 @@ class OpportunityService:
             # 1. force_refresh=True (user wants fresh leads immediately)
             # 2. OR cooldown passed (auto-refresh for one-time searches - get fresh leads)
             # 3. OR no leads exist (first time or leads were deleted)
+            if progress_callback:
+                progress_callback(30, "Searching for opportunities...")
             try:
                 await OpportunityService.trigger_rixly_scrape(rixly_search_id)
                 logger.info(
@@ -671,6 +775,8 @@ class OpportunityService:
         # Step 5: Wait for scraping to complete (or poll for results)
         # Scraping can take 15-60+ seconds (Reddit API + AI analysis)
         if is_scraping:
+            if progress_callback:
+                progress_callback(40, "Analyzing opportunities...")
             # Poll for scraping completion
             max_wait_time = 120  # 2 minutes max wait
             poll_interval = 5  # Check every 5 seconds
@@ -683,11 +789,26 @@ class OpportunityService:
                 status = await OpportunityService.check_rixly_scrape_status(rixly_search_id)
                 current_status = status.get("status", "idle")
                 
+                # Use elapsed time from Rixly if available, otherwise use our wait time
+                elapsed = status.get("elapsed_seconds") or waited
+                
+                # Update progress based on elapsed time (40-70% range for scraping)
+                if progress_callback:
+                    # Estimate progress: assume scraping takes 60-120 seconds on average
+                    # Use elapsed time to estimate progress more accurately
+                    estimated_duration = 90  # Average scraping time in seconds
+                    progress = min(40 + int((elapsed / estimated_duration) * 30), 70)
+                    progress_callback(progress, "Analyzing opportunities...")
+                
                 if current_status in ["completed", "idle"]:
                     logger.info(f"Scraping completed for {rixly_search_id}")
+                    if progress_callback:
+                        progress_callback(70, "Processing results...")
                     break
                 elif current_status == "failed":
                     logger.warning(f"Scraping failed for {rixly_search_id}: {status.get('error')}")
+                    if progress_callback:
+                        progress_callback(70, "Processing available opportunities...")
                     break
                 elif current_status in ["processing", "running"]:
                     # Still processing, continue waiting
@@ -696,14 +817,20 @@ class OpportunityService:
                 else:
                     # Unknown status - might have completed
                     logger.info(f"Scraping status: {current_status} for {rixly_search_id}")
+                    if progress_callback:
+                        progress_callback(70, "Processing results...")
                     break
         else:
             # No scraping triggered, wait a bit for any existing scraping to progress
+            if progress_callback:
+                progress_callback(50, "Processing opportunities...")
             await asyncio.sleep(5)
         
         # Step 6: Fetch ALL leads from Rixly (with retry logic)
         # Fetch all leads - deduplication will handle skipping existing opportunities
         # This ensures we get both new and old leads, but only create new opportunities
+        if progress_callback:
+            progress_callback(75, "Loading opportunities...")
         max_retries = 10
         retry_delay = 5  # seconds
         rixly_leads = []
@@ -729,15 +856,24 @@ class OpportunityService:
                         offset += len(batch)
                         # If we got fewer than batch_size, we've reached the end
                         has_more = len(batch) == batch_size
+                        
+                        # Update progress during fetching (75-85% range)
+                        if progress_callback and len(all_leads) > 0:
+                            progress = min(75 + int((len(all_leads) / 1000) * 10), 85)
+                            progress_callback(progress, f"Found {len(all_leads)} opportunities...")
                     else:
                         has_more = False
                 
                 if all_leads:
                     rixly_leads = all_leads
                     logger.info(f"Fetched {len(rixly_leads)} total leads from Rixly (attempt {attempt + 1})")
+                    if progress_callback:
+                        progress_callback(85, f"Found {len(rixly_leads)} opportunities, finalizing...")
                     break
                 elif attempt < max_retries - 1:
                     logger.info(f"No leads yet, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}")
+                    if progress_callback:
+                        progress_callback(75, "Searching for opportunities...")
                     await asyncio.sleep(retry_delay)
             except HTTPException:
                 raise
@@ -790,10 +926,17 @@ class OpportunityService:
             )
         
         # Process only new leads (not already converted)
+        if progress_callback:
+            progress_callback(85, f"Processing {len(valid_leads)} opportunities...")
         opportunities_created = []
         opportunities_skipped = 0
+        total_leads = len(valid_leads)
         
-        for source_post_id, rixly_lead in valid_leads:
+        for idx, (source_post_id, rixly_lead) in enumerate(valid_leads):
+            # Update progress during conversion (85-95% range)
+            if progress_callback and idx % 10 == 0:  # Update every 10 leads
+                progress = min(85 + int((idx / total_leads) * 10), 95) if total_leads > 0 else 85
+                progress_callback(progress, f"Processing opportunities... ({idx + 1}/{total_leads})")
             # Skip if already converted to opportunity for this user
             if source_post_id in existing_opportunities:
                 opportunities_skipped += 1
@@ -829,6 +972,9 @@ class OpportunityService:
                 amount=len(opportunities_created),
                 db=db
             )
+        
+        if progress_callback:
+            progress_callback(95, f"Finalizing {len(opportunities_created)} opportunities...")
         
         logger.info(
             f"Generated {len(opportunities_created)} opportunities for user {user_id}, "

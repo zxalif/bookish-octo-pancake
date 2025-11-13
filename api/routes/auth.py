@@ -454,6 +454,7 @@ class VerifyEmailRequest(BaseModel):
 
 
 @router.post("/verify-email", status_code=status.HTTP_200_OK)
+@limiter.limit("10/minute")
 async def verify_email(
     request: Request,
     verify_data: VerifyEmailRequest,
@@ -465,6 +466,8 @@ async def verify_email(
     Validates the verification token and marks the user's email as verified.
     Sends a welcome email after successful verification.
     
+    **SECURITY**: Rate limited to 10 requests per minute per IP to prevent abuse.
+    
     **Request Body**:
     - token: Email verification token from email
     - user_id: User UUID from email
@@ -472,6 +475,7 @@ async def verify_email(
     **Response 200**: Success message
     
     **Response 400**: Invalid or expired token
+    **Response 429**: Rate limit exceeded
     """
     # First, get the user by user_id to check if they exist
     user_by_id = AuthService.get_user_by_id(verify_data.user_id, db)
@@ -573,6 +577,7 @@ class ResendVerificationRequest(BaseModel):
 
 
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
 async def resend_verification_email(
     request: Request,
     resend_data: ResendVerificationRequest,
@@ -584,10 +589,13 @@ async def resend_verification_email(
     Sends a new verification email if the user exists and is not yet verified.
     Always returns success to prevent email enumeration attacks.
     
+    **SECURITY**: Rate limited to 5 requests per minute per IP to prevent abuse.
+    
     **Request Body**:
     - email: User's email address
     
     **Response 200**: Success message (always returns success for security)
+    **Response 429**: Rate limit exceeded
     """
     # Get IP address from request for audit logging
     ip_address = get_remote_address(request)

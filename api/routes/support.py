@@ -4,13 +4,14 @@ Support Routes
 Handles support thread and message operations.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.logger import get_logger
 from api.dependencies import get_current_user
+from api.middleware.rate_limit import limiter
 from models.user import User
 from models.support_thread import SupportThread
 from models.support_message import SupportMessage
@@ -128,36 +129,45 @@ async def get_support_thread(
 
 
 @router.post("/threads", response_model=ThreadResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
 async def create_support_thread(
-    request: CreateThreadRequest,
+    request: Request,
+    thread_data: CreateThreadRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Create a new support thread.
     
+    **SECURITY**: Rate limited to 5 requests per minute per IP to prevent abuse.
+    User input is sanitized to prevent XSS attacks.
+    
     Args:
-        request: Thread creation request
+        request: FastAPI request object (for rate limiting)
+        thread_data: Thread creation request
         
     Returns:
         Created support thread
+        
+    Response 429: Rate limit exceeded
     """
-    if not request.subject.strip():
+    if not thread_data.subject.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Subject is required"
         )
     
-    if not request.message.strip():
+    if not thread_data.message.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Message is required"
         )
     
+    # Input sanitization is handled in SupportService.create_thread
     thread = SupportService.create_thread(
         current_user.id,
-        request.subject.strip(),
-        request.message.strip(),
+        thread_data.subject.strip(),
+        thread_data.message.strip(),
         db
     )
     
@@ -165,33 +175,42 @@ async def create_support_thread(
 
 
 @router.post("/threads/{thread_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def add_message_to_thread(
+    request: Request,
     thread_id: str,
-    request: CreateMessageRequest,
+    message_data: CreateMessageRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Add a message to a support thread.
     
+    **SECURITY**: Rate limited to 10 requests per minute per IP to prevent abuse.
+    User input is sanitized to prevent XSS attacks.
+    
     Args:
+        request: FastAPI request object (for rate limiting)
         thread_id: Thread ID
-        request: Message creation request
+        message_data: Message creation request
         
     Returns:
         Created message
+        
+    Response 429: Rate limit exceeded
     """
-    if not request.content.strip():
+    if not message_data.content.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Message content is required"
         )
     
     try:
+        # Input sanitization is handled in SupportService.add_message
         message = SupportService.add_message(
             thread_id,
             current_user.id,
-            request.content.strip(),
+            message_data.content.strip(),
             db
         )
         return message.to_dict()

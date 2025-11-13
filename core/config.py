@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     MAX_KEYWORDS_PER_SEARCH: int = 20
     MAX_SUBREDDITS_PER_SEARCH: int = 15
     
+    # Request Size Limits (Security)
+    MAX_REQUEST_SIZE_MB: int = 10  # Maximum request body size in MB (default: 10MB)
+    
     # API Configuration
     API_URL: str = "http://localhost:7300"
     FRONTEND_URL: str = "http://localhost:9100"
@@ -64,6 +67,7 @@ class Settings(BaseSettings):
     # Rixly API Integration (for lead generation)
     RIXLY_API_URL: str = "http://localhost:8000"  # Rixly production port (7101 for dev)
     RIXLY_API_KEY: str = "dev_api_key"  # Default API key for development
+    RIXLY_WEBHOOK_SECRET: str = ""  # Secret key for verifying Rixly webhook signatures (generate with: openssl rand -hex 32)
     
     # Service Token (for scheduled jobs/cron authentication)
     SERVICE_TOKEN: str = ""  # Set in .env for production (e.g., generate with: openssl rand -hex 32)

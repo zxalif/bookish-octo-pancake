@@ -5,7 +5,7 @@ Handles opportunity management (renamed from "leads" for freelancer focus).
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ import asyncio
 
 from core.database import get_db
 from core.logger import get_logger
+from core.sanitization import sanitize_notes
 from api.dependencies import get_current_user, require_active_subscription
 from api.middleware.rate_limit import limiter
 from models.user import User
@@ -294,8 +295,9 @@ async def update_opportunity(
             )
     
     # Update notes if provided
+    # SECURITY: Sanitize user input to prevent XSS attacks
     if opportunity_data.notes is not None:
-        opportunity.notes = opportunity_data.notes
+        opportunity.notes = sanitize_notes(opportunity_data.notes) if opportunity_data.notes.strip() else None
     
     db.commit()
     db.refresh(opportunity)
@@ -392,8 +394,18 @@ async def process_opportunity_generation(
             job_id=job_id,
             status=JobStatus.PROCESSING,
             progress=10,
-            message="Creating search in Rixly..."
+            message="Starting opportunity search..."
         )
+        
+        # Generate opportunities with progress callback
+        def update_progress(progress: int, message: str):
+            """Update job progress during generation."""
+            JobService.update_job_status(
+                job_id=job_id,
+                status=JobStatus.PROCESSING,
+                progress=progress,
+                message=message
+            )
         
         # Generate opportunities
         result = await OpportunityService.generate_opportunities(
@@ -402,7 +414,8 @@ async def process_opportunity_generation(
             subscription_id=subscription_id,
             db=db,
             limit=limit,
-            force_refresh=force_refresh
+            force_refresh=force_refresh,
+            progress_callback=update_progress
         )
         
         # Update status to completed
@@ -840,8 +853,8 @@ class RixlyWebhookPayload(BaseModel):
 @router.post("/webhook/rixly", status_code=status.HTTP_200_OK)
 async def rixly_webhook(
     request: Request,
-    payload: RixlyWebhookPayload,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_rixly_signature: Optional[str] = Header(None, alias="X-Rixly-Signature")
 ):
     """
     Receive webhook notifications from Rixly API.
@@ -853,7 +866,10 @@ async def rixly_webhook(
     For scheduled searches, sends email notifications to users when leads are found.
     
     **Authentication**: None (webhook endpoint)
-    **Security**: Should verify webhook signature in production (not implemented yet)
+    **Security**: Webhook signature verification using RIXLY_WEBHOOK_SECRET
+    
+    **Headers**:
+    - X-Rixly-Signature: HMAC-SHA256 signature of the request body
     
     **Request Body**:
     - event: Event type ("lead.created" or "job.completed")
@@ -862,13 +878,59 @@ async def rixly_webhook(
     - stats: Job statistics (for job.completed events)
     
     **Response 200**: Success
+    **Response 401**: Invalid webhook signature
     """
     from services.email_service import EmailService
     from core.config import get_settings
+    import hmac
+    import hashlib
+    import json
     
     settings = get_settings()
-    event_type = payload.event
     
+    # Get raw body for signature verification (must be done before parsing JSON)
+    body = await request.body()
+    
+    # Verify webhook signature
+    if settings.RIXLY_WEBHOOK_SECRET:
+        if not x_rixly_signature:
+            logger.warning("Rixly webhook received without signature header")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing webhook signature"
+            )
+        
+        # Calculate expected signature
+        expected_signature = hmac.new(
+            settings.RIXLY_WEBHOOK_SECRET.encode(),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Compare signatures (constant-time comparison)
+        if not hmac.compare_digest(expected_signature, x_rixly_signature):
+            logger.warning(f"Invalid Rixly webhook signature. Expected: {expected_signature[:16]}..., Got: {x_rixly_signature[:16]}...")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid webhook signature"
+            )
+        
+        logger.debug("Rixly webhook signature verified successfully")
+    else:
+        logger.warning("RIXLY_WEBHOOK_SECRET not set - webhook signature verification disabled")
+    
+    # Parse payload after signature verification
+    try:
+        payload_data = json.loads(body)
+        payload = RixlyWebhookPayload(**payload_data)
+    except Exception as e:
+        logger.error(f"Failed to parse Rixly webhook payload: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid webhook payload: {str(e)}"
+        )
+    
+    event_type = payload.event
     logger.info(f"Received Rixly webhook: {event_type}")
     
     # Get keyword search ID from webhook payload

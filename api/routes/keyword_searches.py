@@ -641,6 +641,19 @@ async def update_keyword_search(
                 )
         search.enabled = search_data.enabled
     
+    # Track if any fields that affect Rixly were changed
+    fields_affecting_rixly = [
+        search_data.name is not None,
+        search_data.keywords is not None,
+        search_data.patterns is not None,
+        search_data.subreddits is not None,
+        search_data.platforms is not None,
+        search_data.scraping_mode is not None,
+        search_data.scraping_interval is not None,
+        search_data.enabled is not None
+    ]
+    should_sync_to_rixly = any(fields_affecting_rixly)
+    
     # Ensure rixly_search_id exists and is valid (create/recreate if missing or deleted)
     # Note: Stored in zola_search_id column for database compatibility
     if not search.zola_search_id:
@@ -655,7 +668,7 @@ async def update_keyword_search(
             # Don't fail the request if Rixly is unavailable
             logger.warning(f"Failed to create search in Rixly (will retry on generate): {str(e)}")
     else:
-        # Check if search exists in Rixly, recreate if missing
+        # Check if search exists in Rixly
         search_exists = await OpportunityService.check_rixly_search_exists(search.zola_search_id)
         if not search_exists:
             # Search doesn't exist - need to recreate
@@ -674,6 +687,23 @@ async def update_keyword_search(
                 )
             except Exception as e:
                 logger.warning(f"Failed to recreate search in Rixly: {str(e)}")
+        elif should_sync_to_rixly:
+            # Search exists and fields were changed - update Rixly to keep in sync
+            try:
+                await OpportunityService.update_keyword_search_in_rixly(
+                    search.zola_search_id,
+                    search
+                )
+                logger.info(
+                    f"Synced keyword search updates to Rixly for search {search.id} "
+                    f"(Rixly ID: {search.zola_search_id})"
+                )
+            except Exception as e:
+                # Don't fail the request if Rixly is unavailable
+                # The local database is already updated, Rixly will be out of sync temporarily
+                logger.warning(
+                    f"Failed to sync updates to Rixly (search will be out of sync): {str(e)}"
+                )
     
     db.commit()
     db.refresh(search)
