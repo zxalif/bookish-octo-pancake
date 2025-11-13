@@ -50,14 +50,20 @@ class SubscriptionInfo(BaseModel):
 
 
 class UserResponse(BaseModel):
-    """User response model."""
+    """User response model.
+    
+    Optimized response containing only fields needed by frontend:
+    - id: User identifier
+    - email: User email address
+    - full_name: User's display name
+    - subscription: Active subscription information (if any)
+    
+    Note: is_active, is_verified, created_at, updated_at are excluded
+    as they are not used by the frontend and are handled server-side.
+    """
     id: str
     email: str
     full_name: str
-    is_active: bool
-    is_verified: bool
-    created_at: str
-    updated_at: str
     subscription: SubscriptionInfo | None = None
 
 
@@ -195,6 +201,7 @@ async def update_current_user(
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_current_user(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -209,6 +216,21 @@ async def delete_current_user(
     
     **Response 401**: Not authenticated
     """
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
+    # Create audit log entry before deletion
+    audit_log = UserAuditLog(
+        user_id=current_user.id,
+        action="delete_account",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details=f"Account deletion requested. Email: {current_user.email}, Account created: {current_user.created_at.isoformat() if current_user.created_at else 'unknown'}"
+    )
+    db.add(audit_log)
+    
+    # Soft delete: deactivate account
     current_user.is_active = False
     db.commit()
     

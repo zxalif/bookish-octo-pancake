@@ -455,6 +455,7 @@ class VerifyEmailRequest(BaseModel):
 
 @router.post("/verify-email", status_code=status.HTTP_200_OK)
 async def verify_email(
+    request: Request,
     verify_data: VerifyEmailRequest,
     db: Session = Depends(get_db)
 ):
@@ -513,8 +514,23 @@ async def verify_email(
             detail="Token does not match user"
         )
     
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
     # Mark email as verified
     user.is_verified = True
+    
+    # Create audit log entry for email verification
+    audit_log = UserAuditLog(
+        user_id=user.id,
+        action="verify_email",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details=f"Email verified successfully: {user.email}"
+    )
+    db.add(audit_log)
+    
     db.commit()
     db.refresh(user)
     
@@ -558,7 +574,8 @@ class ResendVerificationRequest(BaseModel):
 
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
 async def resend_verification_email(
-    request: ResendVerificationRequest,
+    request: Request,
+    resend_data: ResendVerificationRequest,
     db: Session = Depends(get_db)
 ):
     """
@@ -572,12 +589,27 @@ async def resend_verification_email(
     
     **Response 200**: Success message (always returns success for security)
     """
-    user = AuthService.get_user_by_email(request.email, db)
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
+    user = AuthService.get_user_by_email(resend_data.email, db)
     
     if user and not user.is_verified:
         # Generate new verification token and send email
         verification_token = AuthService.generate_email_verification_token(user.id)
         await EmailService.send_verification_email(user.email, user.id, verification_token)
+        
+        # Create audit log entry for resend verification
+        audit_log = UserAuditLog(
+            user_id=user.id,
+            action="resend_verification",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Verification email resent for: {resend_data.email}"
+        )
+        db.add(audit_log)
+        db.commit()
     
     # Always return success to prevent email enumeration
     return {

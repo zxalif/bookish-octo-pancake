@@ -101,6 +101,17 @@ class OpportunityService:
         # Prepare payload for Rixly API
         # Rixly expects reddit_config with subreddits array
         subreddits = keyword_search.subreddits or ["forhire", "hiring", "freelance"]
+        
+        # Build webhook URL for SaaS API to receive notifications from Rixly
+        # Only set webhook for scheduled searches (one-time searches don't need webhooks)
+        scraping_mode = getattr(keyword_search, 'scraping_mode', 'one_time')
+        webhook_url = None
+        if scraping_mode == "scheduled":
+            from core.config import get_settings
+            settings = get_settings()
+            # Webhook URL points to SaaS API endpoint that will handle notifications
+            webhook_url = f"{settings.API_URL}/api/v1/opportunities/webhook/rixly"
+        
         payload = {
             "name": keyword_search.name,
             "keywords": keyword_search.keywords,
@@ -113,8 +124,10 @@ class OpportunityService:
                 "sort": "new",
                 "time_filter": "day"
             },
-            "scraping_mode": "one_time",  # Always use one_time for on-demand scraping
-            "enabled": keyword_search.enabled
+            "scraping_mode": scraping_mode,
+            "scraping_interval": getattr(keyword_search, 'scraping_interval', None),  # Include interval for scheduled mode, None for backward compatibility
+            "enabled": keyword_search.enabled,
+            "webhook_url": webhook_url  # Set webhook URL for scheduled searches
         }
         
         try:

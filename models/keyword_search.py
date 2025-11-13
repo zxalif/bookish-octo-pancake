@@ -64,6 +64,10 @@ class KeywordSearch(Base, TimestampMixin, SoftDeleteMixin):
     enabled = Column(Boolean, default=True, nullable=False, index=True)
     last_run_at = Column(DateTime, nullable=True)
     
+    # Scheduling Configuration
+    scraping_mode = Column(String(20), default="one_time", nullable=False)  # "one_time" or "scheduled"
+    scraping_interval = Column(String(10), nullable=True)  # "30m", "1h", "6h", "24h" (only for scheduled mode)
+    
     # Rixly Integration
     # Note: Column name kept as zola_search_id for database compatibility, but now stores Rixly search ID
     zola_search_id = Column(String(100), nullable=True, index=True)  # Rixly search ID (for reuse)
@@ -91,6 +95,8 @@ class KeywordSearch(Base, TimestampMixin, SoftDeleteMixin):
             "subreddits": self.subreddits,
             "platforms": self.platforms,
             "enabled": self.enabled,
+            "scraping_mode": self.scraping_mode,
+            "scraping_interval": self.scraping_interval,
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
             "zola_search_id": self.zola_search_id,
             "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,

@@ -4,13 +4,15 @@ Subscription Routes
 Handles subscription management.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from slowapi.util import get_remote_address
 
 from core.database import get_db
 from api.dependencies import get_current_user
 from models.user import User
+from models.user_audit_log import UserAuditLog
 from models.subscription import Subscription, SubscriptionPlan
 from services.subscription_service import SubscriptionService
 
@@ -180,6 +182,7 @@ async def create_subscription(
 
 @router.post("/cancel")
 async def cancel_subscription(
+    request: Request,
     cancel_at_period_end: bool = True,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -206,12 +209,30 @@ async def cancel_subscription(
             detail="No active subscription found"
         )
     
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
+    old_status = subscription.status.value
+    old_plan = subscription.plan.value
+    
     cancelled = SubscriptionService.cancel_subscription(
         subscription_id=subscription.id,
         user_id=current_user.id,
         cancel_at_period_end=cancel_at_period_end,
         db=db
     )
+    
+    # Create audit log entry for subscription cancellation
+    audit_log = UserAuditLog(
+        user_id=current_user.id,
+        action="cancel_subscription",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details=f"Subscription cancelled. Plan: {old_plan}, Status: {old_status} -> {cancelled.status.value}, Cancel at period end: {cancel_at_period_end}"
+    )
+    db.add(audit_log)
+    db.commit()
     
     # Use Pydantic model to ensure only expected fields are returned
     subscription_response = SubscriptionResponse(

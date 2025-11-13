@@ -101,10 +101,8 @@ class User(Base, TimestampMixin):
             "id": self.id,
             "email": self.email,
             "full_name": self.full_name,
-            "is_active": self.is_active,
-            "is_verified": self.is_verified,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            # Note: IP addresses and consent details are excluded for privacy
+            # Note: is_active, is_verified, created_at, updated_at are excluded
+            # as they are not used by the frontend and are handled server-side.
+            # IP addresses and consent details are also excluded for privacy.
             # Consent data can be added to a separate endpoint if needed for user preferences
         }

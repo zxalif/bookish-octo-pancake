@@ -370,6 +370,87 @@ class EmailService:
         return EmailService._send_email(user.email, subject, html_body, text_body)
     
     @staticmethod
+    async def send_leads_notification_email(
+        user_email: str,
+        user_name: str,
+        keyword_search_name: str,
+        leads_count: int,
+        opportunities_url: str
+    ) -> bool:
+        """
+        Send email notification when new leads are generated for scheduled keyword searches.
+        
+        Args:
+            user_email: User's email address
+            user_name: User's full name
+            keyword_search_name: Name of the keyword search
+            leads_count: Number of new leads/opportunities found
+            opportunities_url: URL to view opportunities in the dashboard
+            
+        Returns:
+            bool: True if sent successfully
+        """
+        subject = f"New Opportunities Found: {leads_count} leads from '{keyword_search_name}'"
+        
+        html_body = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+              <h2 style="color: #4F46E5;">New Opportunities Found!</h2>
+              <p>Hi {user_name},</p>
+              <p>Your scheduled keyword search <strong>"{keyword_search_name}"</strong> has found <strong>{leads_count}</strong> new opportunity/opportunities!</p>
+              <div style="background-color: #F3F4F6; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                <p style="margin: 0;"><strong>Search:</strong> {keyword_search_name}</p>
+                <p style="margin: 5px 0 0 0;"><strong>New Opportunities:</strong> {leads_count}</p>
+              </div>
+              <p>Check them out in your dashboard:</p>
+              <a href="{opportunities_url}" style="display: inline-block; background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0;">View Opportunities</a>
+              <p style="margin-top: 30px; color: #6B7280; font-size: 14px;">
+                This is an automated notification from your scheduled keyword search. 
+                You can manage your searches and notification preferences in your dashboard.
+              </p>
+              <p style="margin-top: 20px; color: #6B7280; font-size: 14px;">
+                Best regards,<br>
+                The ClientHunt Team
+              </p>
+            </div>
+          </body>
+        </html>
+        """
+        
+        text_body = f"""
+        New Opportunities Found!
+
+        Hi {user_name},
+
+        Your scheduled keyword search "{keyword_search_name}" has found {leads_count} new opportunity/opportunities!
+
+        Search: {keyword_search_name}
+        New Opportunities: {leads_count}
+
+        View them in your dashboard: {opportunities_url}
+
+        This is an automated notification from your scheduled keyword search. 
+        You can manage your searches and notification preferences in your dashboard.
+
+        Best regards,
+        The ClientHunt Team
+        """
+        
+        # Use leads@clienthunt.app as the sender email
+        from_email = "leads@clienthunt.app"
+        from_name = "ClientHunt Leads"
+        
+        return EmailService._send_email(
+            user_email, 
+            subject, 
+            html_body, 
+            text_body,
+            from_email=from_email,
+            from_name=from_name
+        )
+    
+    @staticmethod
     def send_support_thread_created_email(
         email: str,
         full_name: str,

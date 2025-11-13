@@ -35,6 +35,8 @@ class KeywordSearchCreate(BaseModel):
     subreddits: List[str] = ["forhire", "hiring", "freelance"]
     platforms: List[str] = ["reddit"]  # reddit, craigslist, linkedin, twitter
     enabled: bool = True
+    scraping_mode: str = "one_time"  # "one_time" or "scheduled"
+    scraping_interval: Optional[str] = None  # "30m", "1h", "6h", "24h" (only for scheduled mode)
     
     class Config:
         json_schema_extra = {
@@ -57,6 +59,8 @@ class KeywordSearchUpdate(BaseModel):
     subreddits: Optional[List[str]] = None
     platforms: Optional[List[str]] = None
     enabled: Optional[bool] = None
+    scraping_mode: Optional[str] = None  # "one_time" or "scheduled"
+    scraping_interval: Optional[str] = None  # "30m", "1h", "6h", "24h" (only for scheduled mode)
 
 
 class KeywordSearchResponse(BaseModel):
@@ -68,6 +72,8 @@ class KeywordSearchResponse(BaseModel):
     subreddits: List[str]
     platforms: List[str]
     enabled: bool
+    scraping_mode: str
+    scraping_interval: Optional[str] = None
     created_at: str
     updated_at: str
     
@@ -123,6 +129,8 @@ async def list_keyword_searches(
             subreddits=search.subreddits or [],
             platforms=search.platforms or ["reddit"],
             enabled=search.enabled,
+            scraping_mode=getattr(search, 'scraping_mode', 'one_time'),  # Backward compatibility
+            scraping_interval=getattr(search, 'scraping_interval', None),  # Backward compatibility
             created_at=search.created_at.isoformat() if search.created_at else "",
             updated_at=search.updated_at.isoformat() if search.updated_at else "",
         )
@@ -177,6 +185,29 @@ async def create_keyword_search(
                    f"Received {len(search_data.subreddits)} subreddits."
         )
     
+    # Validate scraping_mode
+    if search_data.scraping_mode not in ["one_time", "scheduled"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scraping_mode must be 'one_time' or 'scheduled'"
+        )
+    
+    # Validate scraping_interval (required for scheduled mode)
+    if search_data.scraping_mode == "scheduled":
+        if not search_data.scraping_interval:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="scraping_interval is required when scraping_mode is 'scheduled'"
+            )
+        if search_data.scraping_interval not in ["30m", "1h", "6h", "24h"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="scraping_interval must be one of: '30m', '1h', '6h', '24h'"
+            )
+    elif search_data.scraping_interval:
+        # Clear interval if mode is one_time
+        search_data.scraping_interval = None
+    
     # Check concurrent keyword search limit (active + soft-deleted this month)
     concurrent_allowed, concurrent_count, concurrent_limit = SubscriptionService.check_usage_limit(
         user_id=current_user.id,
@@ -215,7 +246,9 @@ async def create_keyword_search(
         patterns=search_data.patterns,
         subreddits=search_data.subreddits,
         platforms=search_data.platforms,
-        enabled=search_data.enabled
+        enabled=search_data.enabled,
+        scraping_mode=search_data.scraping_mode,
+        scraping_interval=search_data.scraping_interval
     )
     
     db.add(keyword_search)
@@ -254,6 +287,8 @@ async def create_keyword_search(
         subreddits=keyword_search.subreddits or [],
         platforms=keyword_search.platforms or ["reddit"],
         enabled=keyword_search.enabled,
+        scraping_mode=getattr(keyword_search, 'scraping_mode', 'one_time'),  # Backward compatibility
+        scraping_interval=getattr(keyword_search, 'scraping_interval', None),  # Backward compatibility
         created_at=keyword_search.created_at.isoformat() if keyword_search.created_at else "",
         updated_at=keyword_search.updated_at.isoformat() if keyword_search.updated_at else "",
     )
@@ -299,6 +334,8 @@ async def get_keyword_search(
         subreddits=search.subreddits or [],
         platforms=search.platforms or ["reddit"],
         enabled=search.enabled,
+        scraping_mode=getattr(search, 'scraping_mode', 'one_time'),  # Backward compatibility
+        scraping_interval=getattr(search, 'scraping_interval', None),  # Backward compatibility
         created_at=search.created_at.isoformat() if search.created_at else "",
         updated_at=search.updated_at.isoformat() if search.updated_at else "",
     )
@@ -539,6 +576,34 @@ async def update_keyword_search(
                        f"Received {len(search_data.subreddits)} subreddits."
             )
     
+    # Validate scraping_mode if provided
+    if search_data.scraping_mode is not None:
+        if search_data.scraping_mode not in ["one_time", "scheduled"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="scraping_mode must be 'one_time' or 'scheduled'"
+            )
+    
+    # Validate scraping_interval if provided or if mode is being set to scheduled
+    current_scraping_mode = getattr(search, 'scraping_mode', 'one_time')  # Backward compatibility
+    current_scraping_interval = getattr(search, 'scraping_interval', None)  # Backward compatibility
+    scraping_mode_to_use = search_data.scraping_mode if search_data.scraping_mode is not None else current_scraping_mode
+    if scraping_mode_to_use == "scheduled":
+        scraping_interval_to_use = search_data.scraping_interval if search_data.scraping_interval is not None else current_scraping_interval
+        if not scraping_interval_to_use:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="scraping_interval is required when scraping_mode is 'scheduled'"
+            )
+        if scraping_interval_to_use not in ["30m", "1h", "6h", "24h"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="scraping_interval must be one of: '30m', '1h', '6h', '24h'"
+            )
+    elif search_data.scraping_mode == "one_time" and search_data.scraping_interval:
+        # Clear interval if mode is being set to one_time
+        search_data.scraping_interval = None
+    
     # Update fields if provided
     if search_data.name is not None:
         search.name = search_data.name
@@ -550,6 +615,16 @@ async def update_keyword_search(
         search.subreddits = search_data.subreddits
     if search_data.platforms is not None:
         search.platforms = search_data.platforms
+    if search_data.scraping_mode is not None:
+        if hasattr(search, 'scraping_mode'):  # Backward compatibility
+            search.scraping_mode = search_data.scraping_mode
+    if search_data.scraping_interval is not None:
+        if hasattr(search, 'scraping_interval'):  # Backward compatibility
+            search.scraping_interval = search_data.scraping_interval
+    elif search_data.scraping_mode == "one_time":
+        # Clear interval if mode is being set to one_time
+        if hasattr(search, 'scraping_interval'):  # Backward compatibility
+            search.scraping_interval = None
     if search_data.enabled is not None:
         # Check limit if enabling (and not soft-deleted)
         if search_data.enabled and not search.enabled and search.deleted_at is None:
@@ -612,6 +687,8 @@ async def update_keyword_search(
         subreddits=search.subreddits or [],
         platforms=search.platforms or ["reddit"],
         enabled=search.enabled,
+        scraping_mode=getattr(search, 'scraping_mode', 'one_time'),  # Backward compatibility
+        scraping_interval=getattr(search, 'scraping_interval', None),  # Backward compatibility
         created_at=search.created_at.isoformat() if search.created_at else "",
         updated_at=search.updated_at.isoformat() if search.updated_at else "",
     )

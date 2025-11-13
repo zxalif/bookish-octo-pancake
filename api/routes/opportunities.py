@@ -4,7 +4,7 @@ Opportunity Routes
 Handles opportunity management (renamed from "leads" for freelancer focus).
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -824,4 +824,112 @@ async def export_opportunities_json(
     return {
         "total": len(opportunities),
         "opportunities": opportunity_responses
+    }
+
+
+# Webhook Models
+class RixlyWebhookPayload(BaseModel):
+    """Rixly webhook payload model."""
+    event: str  # "lead.created" or "job.completed"
+    timestamp: Optional[str] = None
+    keyword_search: Optional[Dict[str, Any]] = None
+    lead: Optional[Dict[str, Any]] = None
+    stats: Optional[Dict[str, Any]] = None
+
+
+@router.post("/webhook/rixly", status_code=status.HTTP_200_OK)
+async def rixly_webhook(
+    request: Request,
+    payload: RixlyWebhookPayload,
+    db: Session = Depends(get_db)
+):
+    """
+    Receive webhook notifications from Rixly API.
+    
+    Handles:
+    - lead.created: When a new lead is found (for scheduled searches)
+    - job.completed: When a scraping job completes (for scheduled searches)
+    
+    For scheduled searches, sends email notifications to users when leads are found.
+    
+    **Authentication**: None (webhook endpoint)
+    **Security**: Should verify webhook signature in production (not implemented yet)
+    
+    **Request Body**:
+    - event: Event type ("lead.created" or "job.completed")
+    - keyword_search: Keyword search information (id, name)
+    - lead: Lead data (for lead.created events)
+    - stats: Job statistics (for job.completed events)
+    
+    **Response 200**: Success
+    """
+    from services.email_service import EmailService
+    from core.config import get_settings
+    
+    settings = get_settings()
+    event_type = payload.event
+    
+    logger.info(f"Received Rixly webhook: {event_type}")
+    
+    # Get keyword search ID from webhook payload
+    keyword_search_id = None
+    keyword_search_name = None
+    if payload.keyword_search:
+        # Rixly sends the Rixly search ID, we need to find the SaaS keyword_search by zola_search_id
+        rixly_search_id = payload.keyword_search.get("id")
+        keyword_search_name = payload.keyword_search.get("name", "Unknown Search")
+        
+        if rixly_search_id:
+            # Find keyword search in SaaS database by zola_search_id (which stores Rixly search ID)
+            keyword_search = db.query(KeywordSearch).filter(
+                KeywordSearch.zola_search_id == rixly_search_id
+            ).first()
+            
+            if keyword_search:
+                keyword_search_id = keyword_search.id
+                keyword_search_name = keyword_search.name
+                
+                # Get user for email notification
+                user = db.query(User).filter(User.id == keyword_search.user_id).first()
+                
+                if event_type == "job.completed":
+                    # Handle job completion - send email if leads were found
+                    stats = payload.stats or {}
+                    leads_created = stats.get("leads_created", 0)
+                    
+                    if leads_created > 0 and user:
+                        # Only send email for scheduled searches
+                        scraping_mode = getattr(keyword_search, 'scraping_mode', 'one_time')
+                        if scraping_mode == "scheduled":
+                            # Build opportunities URL
+                            opportunities_url = f"{settings.FRONTEND_URL}/dashboard/opportunities?search={keyword_search_id}"
+                            
+                            # Send email notification
+                            try:
+                                await EmailService.send_leads_notification_email(
+                                    user_email=user.email,
+                                    user_name=user.full_name,
+                                    keyword_search_name=keyword_search_name,
+                                    leads_count=leads_created,
+                                    opportunities_url=opportunities_url
+                                )
+                                logger.info(
+                                    f"Sent leads notification email to {user.email} for search {keyword_search_name} "
+                                    f"({leads_created} leads)"
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    f"Failed to send leads notification email to {user.email}: {str(e)}",
+                                    exc_info=True
+                                )
+                
+                elif event_type == "lead.created":
+                    # Handle individual lead creation (optional - we mainly use job.completed)
+                    # Could send instant notifications here if desired
+                    pass
+    
+    return {
+        "status": "success",
+        "message": f"Webhook received: {event_type}",
+        "keyword_search_id": keyword_search_id
     }
