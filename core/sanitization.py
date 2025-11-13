@@ -118,3 +118,57 @@ def sanitize_name(name: str) -> str:
     """
     return sanitize_text(name, max_length=MAX_NAME_LENGTH, allow_html=False)
 
+
+def sanitize_extracted_info(extracted_info: dict | None) -> dict | None:
+    """
+    Sanitize extracted_info to only include fields needed by frontend.
+    
+    Removes internal AI processing structure (classification, contact_info, budget_info, scores)
+    and only returns user-facing fields.
+    
+    Args:
+        extracted_info: Raw extracted_info dict from database
+        
+    Returns:
+        Sanitized dict with only frontend-required fields, or None if input is None/empty
+        
+    Security:
+        - Prevents leaking internal AI processing structure
+        - Only exposes fields actually used by frontend
+        - Removes confidence scores, reasoning, internal metadata
+    """
+    if not extracted_info or not isinstance(extracted_info, dict):
+        return None
+    
+    # Fields that frontend actually uses (from frontend/src/types/opportunity.ts and BudgetDisplay.tsx)
+    allowed_fields = {
+        # Budget fields
+        'budget',
+        'budget_min',
+        'budget_max',
+        'budget_currency',
+        # Timeline fields
+        'timeline',
+        'deadline',
+        # Requirements and skills
+        'requirements',
+        'skills',
+        # Location fields
+        'location',
+        'remote',
+        # Payment method
+        'payment_method',
+    }
+    
+    # Build sanitized dict with only allowed fields
+    sanitized = {}
+    for field in allowed_fields:
+        if field in extracted_info:
+            value = extracted_info[field]
+            # Only include non-null values
+            if value is not None:
+                sanitized[field] = value
+    
+    # Return None if no valid fields found (instead of empty dict)
+    return sanitized if sanitized else None
+

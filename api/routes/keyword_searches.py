@@ -68,7 +68,6 @@ class KeywordSearchResponse(BaseModel):
     id: str
     name: str
     keywords: List[str]
-    patterns: List[str]
     subreddits: List[str]
     platforms: List[str]
     enabled: bool
@@ -82,6 +81,7 @@ class KeywordSearchResponse(BaseModel):
     # - last_run_at: Not used by frontend
     # - zola_search_id: Internal Rixly ID, should not be exposed
     # - deleted_at: Internal soft-delete timestamp, should not be exposed
+    # - patterns: Internal matching patterns, should not be exposed (security)
 
 
 @router.get("/", response_model=List[KeywordSearchResponse])
@@ -120,12 +120,12 @@ async def list_keyword_searches(
     searches = query.order_by(KeywordSearch.created_at.desc()).all()
     
     # Use Pydantic model to ensure only expected fields are returned
+    # Note: patterns field is excluded from response for security (internal matching logic)
     return [
         KeywordSearchResponse(
             id=search.id,
             name=search.name,
             keywords=search.keywords,
-            patterns=search.patterns or [],
             subreddits=search.subreddits or [],
             platforms=search.platforms or ["reddit"],
             enabled=search.enabled,
@@ -283,7 +283,6 @@ async def create_keyword_search(
         id=keyword_search.id,
         name=keyword_search.name,
         keywords=keyword_search.keywords,
-        patterns=keyword_search.patterns or [],
         subreddits=keyword_search.subreddits or [],
         platforms=keyword_search.platforms or ["reddit"],
         enabled=keyword_search.enabled,
@@ -326,11 +325,11 @@ async def get_keyword_search(
         )
     
     # Use Pydantic model to ensure only expected fields are returned
+    # Note: patterns field is excluded from response for security (internal matching logic)
     return KeywordSearchResponse(
         id=search.id,
         name=search.name,
         keywords=search.keywords,
-        patterns=search.patterns or [],
         subreddits=search.subreddits or [],
         platforms=search.platforms or ["reddit"],
         enabled=search.enabled,
@@ -709,11 +708,11 @@ async def update_keyword_search(
     db.refresh(search)
     
     # Use Pydantic model to ensure only expected fields are returned
+    # Note: patterns field is excluded from response for security (internal matching logic)
     return KeywordSearchResponse(
         id=search.id,
         name=search.name,
         keywords=search.keywords,
-        patterns=search.patterns or [],
         subreddits=search.subreddits or [],
         platforms=search.platforms or ["reddit"],
         enabled=search.enabled,

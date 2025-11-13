@@ -17,7 +17,7 @@ import asyncio
 
 from core.database import get_db
 from core.logger import get_logger
-from core.sanitization import sanitize_notes
+from core.sanitization import sanitize_notes, sanitize_extracted_info
 from api.dependencies import get_current_user, require_active_subscription
 from api.middleware.rate_limit import limiter
 from models.user import User
@@ -147,7 +147,7 @@ async def list_opportunities(
     # Pagination
     opportunities = query.offset(offset).limit(limit).all()
     
-    # Convert to response models (exclude user_id)
+    # Convert to response models (exclude user_id, sanitize extracted_info)
     items = [
         OpportunityResponse(
             id=opp.id,
@@ -166,7 +166,7 @@ async def list_opportunities(
             relevance_score=opp.relevance_score,
             urgency_score=opp.urgency_score,
             total_score=opp.total_score,
-            extracted_info=opp.extracted_info,
+            extracted_info=sanitize_extracted_info(opp.extracted_info),  # Sanitize to only include frontend fields
             status=opp.status.value,
             notes=opp.notes,
             created_at=opp.created_at.isoformat() if opp.created_at else "",
@@ -237,7 +237,7 @@ async def get_opportunity(
         relevance_score=opportunity.relevance_score,
         urgency_score=opportunity.urgency_score,
         total_score=opportunity.total_score,
-        extracted_info=opportunity.extracted_info,
+        extracted_info=sanitize_extracted_info(opportunity.extracted_info),  # Sanitize to only include frontend fields
         status=opportunity.status.value,
         notes=opportunity.notes,
         created_at=opportunity.created_at.isoformat() if opportunity.created_at else "",
@@ -320,7 +320,7 @@ async def update_opportunity(
         relevance_score=opportunity.relevance_score,
         urgency_score=opportunity.urgency_score,
         total_score=opportunity.total_score,
-        extracted_info=opportunity.extracted_info,
+        extracted_info=sanitize_extracted_info(opportunity.extracted_info),  # Sanitize to only include frontend fields
         status=opportunity.status.value,
         notes=opportunity.notes,
         created_at=opportunity.created_at.isoformat() if opportunity.created_at else "",
@@ -825,7 +825,7 @@ async def export_opportunities_json(
             relevance_score=opp.relevance_score,
             urgency_score=opp.urgency_score,
             total_score=opp.total_score,
-            extracted_info=opp.extracted_info,
+            extracted_info=sanitize_extracted_info(opp.extracted_info),  # Sanitize to only include frontend fields
             status=opp.status.value,
             notes=opp.notes,
             created_at=opp.created_at.isoformat() if opp.created_at else "",
