@@ -44,9 +44,14 @@ class SubscriptionInfo(BaseModel):
     id: str | None = None
     plan: str | None = None
     status: str | None = None
+    billing_period: str | None = None
     current_period_start: str | None = None
     current_period_end: str | None = None
     cancel_at_period_end: bool = False
+    last_billing_date: str | None = None
+    next_billing_date: str | None = None
+    last_billing_status: str | None = None
+    trial_end_date: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -97,9 +102,14 @@ async def get_current_user_info(
             "id": subscription_data.get("id"),
             "plan": subscription_data.get("plan"),
             "status": subscription_data.get("status"),
+            "billing_period": subscription_data.get("billing_period"),
             "current_period_start": subscription_data.get("current_period_start"),
             "current_period_end": subscription_data.get("current_period_end"),
-            "cancel_at_period_end": subscription_data.get("cancel_at_period_end", False)
+            "cancel_at_period_end": subscription_data.get("cancel_at_period_end", False),
+            "last_billing_date": subscription_data.get("last_billing_date"),
+            "next_billing_date": subscription_data.get("next_billing_date"),
+            "last_billing_status": subscription_data.get("last_billing_status"),
+            "trial_end_date": subscription_data.get("trial_end_date")
         }
     else:
         user_data["subscription"] = None

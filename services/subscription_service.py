@@ -6,6 +6,7 @@ Handles subscription management business logic:
 - Check subscription limits
 - Activate/cancel subscriptions
 - Plan management
+- Upgrade/downgrade subscriptions with proration
 """
 
 from typing import Optional
@@ -134,30 +135,38 @@ class SubscriptionService:
         # Limits are enforced normally like other plans
         
         if metric_type == "keyword_searches":
-            # CONCURRENT limit - count active + soft-deleted searches in current month
-            # This prevents abuse: deleted searches still count until next month
-            # Get current month period
+            # CONCURRENT limit - count active + soft-deleted searches in current billing period
+            # This prevents abuse: deleted searches still count until billing period ends
             now = datetime.utcnow()
-            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             
-            # Count: active searches OR soft-deleted searches from current month
+            # Use subscription's billing period start, not calendar month
+            if subscription.current_period_start:
+                period_start = subscription.current_period_start
+            else:
+                # Fallback to calendar month if subscription has no period start
+                period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            
+            # Count: active searches OR soft-deleted searches from current billing period
             current_count = db.query(KeywordSearch).filter(
                 KeywordSearch.user_id == user_id,
                 # Active searches
                 (
                     (KeywordSearch.enabled == True) & (KeywordSearch.deleted_at.is_(None))  # type: ignore
                 ) | (
-                    # OR soft-deleted searches from current month (still count toward limit)
+                    # OR soft-deleted searches from current billing period (still count toward limit)
                     (KeywordSearch.deleted_at.isnot(None)) &  # type: ignore
-                    (KeywordSearch.deleted_at >= month_start)  # type: ignore
+                    (KeywordSearch.deleted_at >= period_start)  # type: ignore
                 )
             ).count()
         elif metric_type == "keyword_searches_created_per_month":
-            # MONTHLY creation limit - track total searches created this month
-            # Get current period (monthly)
-            now = datetime.utcnow()
-            period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            period_end = (period_start + timedelta(days=32)).replace(day=1) - timedelta(seconds=1)
+            # MONTHLY creation limit - track total searches created in current billing period
+            # Use subscription's billing period, not calendar month
+            if subscription.current_period_start:
+                period_start = subscription.current_period_start
+            else:
+                # Fallback to calendar month if subscription has no period start
+                now = datetime.utcnow()
+                period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             
             usage_metric = db.query(UsageMetric).filter(
                 UsageMetric.user_id == user_id,
@@ -399,4 +408,3 @@ class SubscriptionService:
         db.refresh(subscription)
         
         return subscription
-

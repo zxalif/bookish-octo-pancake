@@ -68,7 +68,10 @@ class Price(Base, TimestampMixin):
     paddle_product_id = Column(String(255), nullable=True)
     
     # Pricing
-    amount = Column(Integer, nullable=False)  # Amount in cents
+    # IMPORTANT: This is the BASE PRICE (excluding VAT/tax)
+    # Paddle handles all VAT/tax calculations automatically as Merchant of Record
+    # VAT is added to customer's total, not deducted from this amount
+    amount = Column(Integer, nullable=False)  # Base price in cents (excluding VAT)
     currency = Column(String(3), nullable=False, default="USD")
     
     # Status

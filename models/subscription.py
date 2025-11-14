@@ -82,6 +82,12 @@ class Subscription(Base, TimestampMixin):
     current_period_end = Column(DateTime, nullable=True)
     cancel_at_period_end = Column(Boolean, default=False, nullable=False)  # Fixed: Now Boolean instead of String
     
+    # Billing History & Status
+    last_billing_date = Column(DateTime, nullable=True, index=True)  # When the last payment was made
+    next_billing_date = Column(DateTime, nullable=True, index=True)  # When the next payment is due
+    last_billing_status = Column(String(50), nullable=True)  # Status of last billing: "completed", "failed", "pending", etc.
+    trial_end_date = Column(DateTime, nullable=True)  # When the trial period ends (if applicable)
+    
     # Relationships
     user = relationship("User", back_populates="subscriptions")
     price = relationship("Price", back_populates="subscriptions")  # Reference to Price model
@@ -124,6 +130,10 @@ class Subscription(Base, TimestampMixin):
             "current_period_start": self.current_period_start.isoformat() if self.current_period_start else None,
             "current_period_end": self.current_period_end.isoformat() if self.current_period_end else None,
             "cancel_at_period_end": self.cancel_at_period_end,  # Already boolean
+            "last_billing_date": self.last_billing_date.isoformat() if self.last_billing_date else None,
+            "next_billing_date": self.next_billing_date.isoformat() if self.next_billing_date else None,
+            "last_billing_status": self.last_billing_status,
+            "trial_end_date": self.trial_end_date.isoformat() if self.trial_end_date else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

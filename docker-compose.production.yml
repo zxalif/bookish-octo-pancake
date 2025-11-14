@@ -33,6 +33,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=1440
       
       # Paddle Payment Gateway
+      - PADDLE_ENABLED=${PADDLE_ENABLED:-true}
       - PADDLE_API_KEY=${PADDLE_API_KEY}
       - PADDLE_VENDOR_ID=${PADDLE_VENDOR_ID}
       - PADDLE_ENVIRONMENT=${PADDLE_ENVIRONMENT:-live}
@@ -99,10 +100,65 @@ services:
           cpus: '2'
           memory: 4G
 
+  # ===== Scheduler Service (Cron Jobs) =====
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    container_name: clienthunt-scheduler
+    network_mode: host  # Use host network - same as API
+    environment:
+      # Database (Native PostgreSQL on host)
+      - DATABASE_URL=${DATABASE_URL}
+      
+      # Paddle Payment Gateway
+      - PADDLE_ENABLED=${PADDLE_ENABLED:-true}
+      - PADDLE_API_KEY=${PADDLE_API_KEY}
+      - PADDLE_VENDOR_ID=${PADDLE_VENDOR_ID}
+      - PADDLE_ENVIRONMENT=${PADDLE_ENVIRONMENT:-live}
+      - PADDLE_WEBHOOK_SECRET=${PADDLE_WEBHOOK_SECRET}
+      
+      # Application Settings
+      - APP_NAME=ClientHunt
+      - DEBUG=False
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/app/logs/scheduler.log
+      # Auto-run migrations on startup (if API doesn't run them)
+      # In production, scheduler waits for API to complete migrations
+      - AUTO_RUN_MIGRATIONS=${AUTO_RUN_MIGRATIONS:-false}
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      # Logs volume
+      - scheduler_logs:/app/logs
+    # Wait for API to complete migrations before starting scheduler
+    # Note: In host network mode, we can't use depends_on with healthcheck
+    # Instead, scheduler will wait for database to be ready and migrations to complete
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "scheduler.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
 # ===== Volumes =====
 # NOTE: No networks section needed with host network mode
 volumes:
   api_logs:
     driver: local
     name: clienthunt-api-logs
+  scheduler_logs:
+    driver: local
+    name: clienthunt-scheduler-logs
 

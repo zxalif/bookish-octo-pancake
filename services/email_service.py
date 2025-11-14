@@ -12,13 +12,28 @@ from typing import Optional
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from datetime import datetime, timedelta
 import secrets
 import hashlib
+import io
+from sqlalchemy.orm import Session
+
+# Optional imports for PDF generation
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
 from core.config import get_settings
 from core.logger import get_logger
-from sqlalchemy.orm import Session
 from models.user import User
 # Note: AuthService imported locally in send_password_reset_email to avoid circular import
 
@@ -650,4 +665,406 @@ class EmailService:
         except Exception as e:
             logger.error(f"Error sending welcome email to {email}: {str(e)}")
             return False
+    
+    @staticmethod
+    async def send_payment_receipt_email(
+        payment_id: str,
+        user_email: str,
+        user_name: str,
+        amount_cents: int,
+        currency: str,
+        plan: str,
+        billing_period: str,
+        transaction_id: Optional[str] = None,
+        db: Optional[Session] = None
+    ) -> bool:
+        """
+        Send payment receipt email with PDF invoice attachment.
+        
+        Args:
+            payment_id: Payment UUID
+            user_email: User's email address
+            user_name: User's full name
+            amount_cents: Payment amount in cents
+            currency: Currency code (e.g., USD)
+            plan: Subscription plan name
+            billing_period: Billing period (monthly/yearly)
+            transaction_id: Paddle transaction ID (optional)
+            db: Database session (optional, for fetching additional details)
+            
+        Returns:
+            bool: True if sent successfully
+        """
+        try:
+            # Format amount
+            amount_dollars = amount_cents / 100
+            currency_symbol = "$" if currency == "USD" else currency
+            formatted_amount = f"{currency_symbol}{amount_dollars:.2f}"
+            
+            # Format billing period
+            billing_period_display = billing_period.capitalize()
+            if billing_period == "monthly":
+                billing_period_display = "Monthly"
+            elif billing_period == "yearly":
+                billing_period_display = "Annual"
+            
+            # Generate PDF invoice
+            pdf_content = EmailService._generate_payment_receipt_pdf(
+                payment_id=payment_id,
+                user_name=user_name,
+                user_email=user_email,
+                amount_cents=amount_cents,
+                currency=currency,
+                plan=plan,
+                billing_period=billing_period,
+                transaction_id=transaction_id
+            )
+            
+            subject = f"Payment Receipt - {formatted_amount} - ClientHunt"
+            
+            html_body = f"""
+            <html>
+              <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                  <h2 style="color: #2563eb;">Payment Receipt</h2>
+                  <p>Hi {user_name},</p>
+                  <p>Thank you for your payment! Your subscription has been successfully processed.</p>
+                  
+                  <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="margin-top: 0; color: #1e40af;">Payment Details</h3>
+                    <table style="width: 100%; border-collapse: collapse;">
+                      <tr>
+                        <td style="padding: 8px 0; font-weight: bold;">Amount:</td>
+                        <td style="padding: 8px 0; text-align: right;">{formatted_amount}</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; font-weight: bold;">Plan:</td>
+                        <td style="padding: 8px 0; text-align: right;">{plan.capitalize()} ({billing_period_display})</td>
+                      </tr>
+                      <tr>
+                        <td style="padding: 8px 0; font-weight: bold;">Payment ID:</td>
+                        <td style="padding: 8px 0; text-align: right; font-family: monospace; font-size: 12px;">{payment_id}</td>
+                      </tr>
+                      {f'<tr><td style="padding: 8px 0; font-weight: bold;">Transaction ID:</td><td style="padding: 8px 0; text-align: right; font-family: monospace; font-size: 12px;">{transaction_id}</td></tr>' if transaction_id else ''}
+                      <tr>
+                        <td style="padding: 8px 0; font-weight: bold;">Date:</td>
+                        <td style="padding: 8px 0; text-align: right;">{datetime.utcnow().strftime('%B %d, %Y')}</td>
+                      </tr>
+                    </table>
+                  </div>
+                  
+                  <p>A detailed receipt has been attached to this email as a PDF.</p>
+                  
+                  <p style="margin-top: 30px;">
+                    <a href="{settings.FRONTEND_URL}/dashboard/subscription" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">View Subscription</a>
+                  </p>
+                  
+                  <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+                    If you have any questions about this payment, please contact our support team.
+                  </p>
+                  
+                  <p style="margin-top: 30px;">
+                    Best regards,<br>
+                    <strong>The ClientHunt Team</strong>
+                  </p>
+                </div>
+              </body>
+            </html>
+            """
+            
+            text_body = f"""
+            Payment Receipt
+            
+            Hi {user_name},
+            
+            Thank you for your payment! Your subscription has been successfully processed.
+            
+            Payment Details:
+            - Amount: {formatted_amount}
+            - Plan: {plan.capitalize()} ({billing_period_display})
+            - Payment ID: {payment_id}
+            {f'- Transaction ID: {transaction_id}' if transaction_id else ''}
+            - Date: {datetime.utcnow().strftime('%B %d, %Y')}
+            
+            A detailed receipt has been attached to this email as a PDF.
+            
+            View your subscription: {settings.FRONTEND_URL}/dashboard/subscription
+            
+            If you have any questions about this payment, please contact our support team.
+            
+            Best regards,
+            The ClientHunt Team
+            """
+            
+            # Create message with PDF attachment
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM_EMAIL}>"
+            msg['To'] = user_email
+            
+            # Add text and HTML parts
+            text_part = MIMEText(text_body, 'plain')
+            msg.attach(text_part)
+            
+            html_part = MIMEText(html_body, 'html')
+            msg.attach(html_part)
+            
+            # Attach PDF
+            pdf_attachment = MIMEBase('application', 'pdf')
+            pdf_attachment.set_payload(pdf_content)
+            encoders.encode_base64(pdf_attachment)
+            pdf_attachment.add_header(
+                'Content-Disposition',
+                f'attachment; filename="receipt-{payment_id}.pdf"'
+            )
+            msg.attach(pdf_attachment)
+            
+            # Send email
+            server = EmailService._create_smtp_connection()
+            try:
+                server.send_message(msg)
+                logger.info(f"Payment receipt email sent successfully to {user_email} (payment_id: {payment_id})")
+                return True
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+            
+        except Exception as e:
+            logger.error(f"Failed to send payment receipt email to {user_email}: {str(e)}", exc_info=True)
+            return False
+    
+    @staticmethod
+    def _generate_payment_receipt_pdf(
+        payment_id: str,
+        user_name: str,
+        user_email: str,
+        amount_cents: int,
+        currency: str,
+        plan: str,
+        billing_period: str,
+        transaction_id: Optional[str] = None
+    ) -> bytes:
+        """
+        Generate PDF receipt for payment.
+        
+        Uses reportlab if available, otherwise generates a simple text-based PDF.
+        
+        Args:
+            payment_id: Payment UUID
+            user_name: User's full name
+            user_email: User's email address
+            amount_cents: Payment amount in cents
+            currency: Currency code
+            plan: Subscription plan name
+            billing_period: Billing period
+            transaction_id: Paddle transaction ID (optional)
+            
+        Returns:
+            bytes: PDF content
+        """
+        if REPORTLAB_AVAILABLE:
+            try:
+                # Use reportlab for better PDF generation
+                buffer = io.BytesIO()
+                doc = SimpleDocTemplate(buffer, pagesize=letter)
+                story = []
+                styles = getSampleStyleSheet()
+                
+                # Custom styles
+                title_style = ParagraphStyle(
+                    'CustomTitle',
+                    parent=styles['Heading1'],
+                    fontSize=24,
+                    textColor=colors.HexColor('#2563eb'),
+                    spaceAfter=30,
+                    alignment=TA_CENTER
+                )
+                
+                heading_style = ParagraphStyle(
+                    'CustomHeading',
+                    parent=styles['Heading2'],
+                    fontSize=14,
+                    textColor=colors.HexColor('#1e40af'),
+                    spaceAfter=12
+                )
+                
+                # Title
+                story.append(Paragraph("Payment Receipt", title_style))
+                story.append(Spacer(1, 0.3*inch))
+                
+                # Company info
+                story.append(Paragraph("<b>ClientHunt</b>", styles['Normal']))
+                story.append(Paragraph("Invoice & Receipt", styles['Normal']))
+                story.append(Spacer(1, 0.2*inch))
+                
+                # Payment details
+                amount_dollars = amount_cents / 100
+                currency_symbol = "$" if currency == "USD" else currency
+                formatted_amount = f"{currency_symbol}{amount_dollars:.2f}"
+                
+                data = [
+                    ['Payment ID:', payment_id],
+                    ['Date:', datetime.utcnow().strftime('%B %d, %Y')],
+                    ['Amount:', formatted_amount],
+                    ['Plan:', f"{plan.capitalize()} ({billing_period.capitalize()})"],
+                ]
+                
+                if transaction_id:
+                    data.append(['Transaction ID:', transaction_id])
+                
+                data.append(['Customer:', user_name])
+                data.append(['Email:', user_email])
+                
+                table = Table(data, colWidths=[2*inch, 4*inch])
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f3f4f6')),
+                    ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                    ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                    ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                    ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                    ('TOPPADDING', (0, 0), (-1, -1), 12),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                ]))
+                
+                story.append(table)
+                story.append(Spacer(1, 0.3*inch))
+                
+                # Footer
+                story.append(Spacer(1, 0.5*inch))
+                story.append(Paragraph("Thank you for your business!", styles['Normal']))
+                story.append(Paragraph("If you have any questions, please contact support.", styles['Normal']))
+                
+                # Build PDF
+                doc.build(story)
+                pdf_content = buffer.getvalue()
+                buffer.close()
+                
+                return pdf_content
+            except Exception as e:
+                logger.error(f"Error generating PDF receipt with reportlab: {str(e)}", exc_info=True)
+                # Fallback to simple PDF
+                return EmailService._generate_simple_pdf_receipt(
+                    payment_id, user_name, user_email, amount_cents, currency, plan, billing_period, transaction_id
+                )
+        else:
+            # Fallback: Generate simple text-based PDF if reportlab not available
+            logger.warning("reportlab not available, generating simple PDF")
+            return EmailService._generate_simple_pdf_receipt(
+                payment_id, user_name, user_email, amount_cents, currency, plan, billing_period, transaction_id
+            )
+    
+    @staticmethod
+    def _generate_simple_pdf_receipt(
+        payment_id: str,
+        user_name: str,
+        user_email: str,
+        amount_cents: int,
+        currency: str,
+        plan: str,
+        billing_period: str,
+        transaction_id: Optional[str] = None
+    ) -> bytes:
+        """
+        Generate a simple text-based PDF receipt (fallback).
+        
+        Args:
+            Same as _generate_payment_receipt_pdf
+            
+        Returns:
+            bytes: Simple PDF content
+        """
+        amount_dollars = amount_cents / 100
+        currency_symbol = "$" if currency == "USD" else currency
+        formatted_amount = f"{currency_symbol}{amount_dollars:.2f}"
+        
+        # Simple PDF structure (minimal PDF format)
+        receipt_text = f"""
+PAYMENT RECEIPT
+ClientHunt
+
+Payment ID: {payment_id}
+Date: {datetime.utcnow().strftime('%B %d, %Y')}
+Amount: {formatted_amount}
+Plan: {plan.capitalize()} ({billing_period.capitalize()})
+{f'Transaction ID: {transaction_id}' if transaction_id else ''}
+
+Customer: {user_name}
+Email: {user_email}
+
+Thank you for your business!
+"""
+        
+        # Convert to simple PDF format (minimal PDF structure)
+        # This is a very basic PDF - for production, use reportlab
+        # Fix f-string: extract backslash operations outside f-string
+        escaped_receipt_text = receipt_text.replace('(', '\\(').replace(')', '\\)')
+        receipt_length = len(receipt_text)
+        startxref_value = 400 + receipt_length
+        
+        pdf_content = f"""%PDF-1.4
+1 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Kids [3 0 R]
+/Count 1
+>>
+endobj
+3 0 obj
+<<
+/Type /Page
+/Parent 2 0 R
+/MediaBox [0 0 612 792]
+/Contents 4 0 R
+/Resources <<
+/Font <<
+/F1 <<
+/Type /Font
+/Subtype /Type1
+/BaseFont /Helvetica
+>>
+>>
+>>
+>>
+endobj
+4 0 obj
+<<
+/Length {receipt_length}
+>>
+stream
+BT
+/F1 12 Tf
+100 700 Td
+({escaped_receipt_text}) Tj
+ET
+endstream
+endobj
+xref
+0 5
+0000000000 65535 f
+0000000009 00000 n
+0000000058 00000 n
+0000000115 00000 n
+0000000300 00000 n
+trailer
+<<
+/Size 5
+/Root 1 0 R
+>>
+startxref
+{startxref_value}
+%%EOF
+""".encode('utf-8')
+        
+        return pdf_content
 

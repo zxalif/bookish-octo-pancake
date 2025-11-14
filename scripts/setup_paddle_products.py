@@ -2,10 +2,10 @@
 """
 Paddle Products Setup Script
 
-This script creates products and prices in Paddle for development/testing.
+This script creates products and prices in Paddle using the official Paddle Python SDK.
 It creates:
 - 3 Products: Starter, Professional, Power
-- 2 Prices per product: Monthly and Yearly
+- 2 Prices per product: Monthly and Yearly (with 2 months free for annual)
 
 Usage:
     python scripts/setup_paddle_products.py
@@ -17,14 +17,19 @@ Environment Variables Required:
 
 import os
 import sys
-import json
 import asyncio
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-import httpx
+from typing import Dict, Optional
 
 # Add parent directory to path to import core modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from paddle_billing import Client, Environment, Options
+from paddle_billing.Entities.Shared.TaxCategory import TaxCategory
+from paddle_billing.Entities.Shared.TimePeriod import TimePeriod
+from paddle_billing.Resources.Products.Operations import CreateProduct
+from paddle_billing.Resources.Prices.Operations import CreatePrice
+from paddle_billing.Exceptions.ApiError import ApiError
 
 from core.config import get_settings
 from core.database import SessionLocal
@@ -34,7 +39,7 @@ settings = get_settings()
 
 
 class PaddleSetup:
-    """Helper class for setting up Paddle products and prices."""
+    """Helper class for setting up Paddle products and prices using the official SDK."""
     
     def __init__(self):
         self.api_key = settings.PADDLE_API_KEY
@@ -43,125 +48,76 @@ class PaddleSetup:
         if not self.api_key:
             raise ValueError("PADDLE_API_KEY environment variable is required")
         
-        # Set base URL based on environment
-        if self.environment == "sandbox":
-            self.base_url = "https://sandbox-api.paddle.com"
+        # Initialize Paddle SDK client with explicit environment
+        # Use sandbox in development or when explicitly set
+        paddle_env = self.environment.lower()
+        if paddle_env == "sandbox" or settings.ENVIRONMENT == "development":
+            # Use sandbox environment
+            options = Options(environment=Environment.SANDBOX)
+            self.paddle = Client(self.api_key, options=options)
+            print(f"✅ Paddle client initialized with SANDBOX environment")
         else:
-            self.base_url = "https://api.paddle.com"
-        
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Paddle-Version": "1"  # Paddle API version
-        }
+            # Use production environment
+            options = Options(environment=Environment.PRODUCTION)
+            self.paddle = Client(self.api_key, options=options)
+            print(f"✅ Paddle client initialized with PRODUCTION environment")
     
-    async def get_vendor_id(self) -> Optional[str]:
-        """
-        Get vendor ID from Paddle account.
-        
-        Returns:
-            str: Vendor ID if found, None otherwise
-        """
-        try:
-            # Try to get vendor info from a simple API call
-            # Note: Paddle API might not have a direct vendor endpoint
-            # We'll try to get it from the first product or transaction
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # Get products to extract vendor info
-                response = await client.get(
-                    f"{self.base_url}/products",
-                    headers=self.headers
-                )
-                response.raise_for_status()
-                data = response.json()
-                
-                # Vendor ID might be in the response or we can use settings
-                if settings.PADDLE_VENDOR_ID:
-                    return settings.PADDLE_VENDOR_ID
-                
-                # Try to extract from response
-                # Note: This is a workaround - vendor ID is usually in dashboard
-                print("⚠️  Vendor ID not found in API response.")
-                print("   Please get it from Paddle Dashboard > Developer Tools")
-                return None
-        except Exception as e:
-            print(f"⚠️  Could not fetch vendor ID: {e}")
-            if settings.PADDLE_VENDOR_ID:
-                return settings.PADDLE_VENDOR_ID
-            return None
-    
-    async def create_product(
+    def create_product(
         self,
         name: str,
-        description: str,
-        product_type: str = "standard"
-    ) -> Dict[str, Any]:
+        description: str
+    ) -> Dict:
         """
-        Create a product in Paddle.
+        Create a product in Paddle using the SDK.
         
         Args:
             name: Product name
             description: Product description
-            product_type: Product type (default: "standard")
             
         Returns:
             dict: Created product data
         """
-        url = f"{self.base_url}/products"
-        
-        payload = {
-            "name": name,
-            "description": description,
-            "type": product_type,
-            "tax_category": "standard"  # Standard tax category
-        }
-        
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url, json=payload, headers=self.headers)
-                response.raise_for_status()
-                data = response.json()
-                
-                product = data.get("data", {})
-                print(f"✅ Created product: {name} (ID: {product.get('id')})")
-                return product
-        except httpx.HTTPStatusError as e:
-            error_data = e.response.json() if e.response.content else {}
-            error_detail = error_data.get("detail", str(e))
+            created_product = self.paddle.products.create(CreateProduct(
+                name=name,
+                description=description,
+                tax_category=TaxCategory.Standard
+            ))
             
+            print(f"✅ Created product: {name} (ID: {created_product.id})")
+            return {
+                "id": created_product.id,
+                "name": created_product.name,
+                "description": created_product.description
+            }
+        except ApiError as e:
             # Check if product already exists
-            if "already exists" in str(error_detail).lower() or e.response.status_code == 409:
+            if e.error_code == "conflict" or "already exists" in str(e).lower():
                 print(f"⚠️  Product '{name}' might already exist. Checking existing products...")
                 # Try to find existing product
-                existing = await self.find_product_by_name(name)
+                existing = self.find_product_by_name(name)
                 if existing:
-                    print(f"✅ Found existing product: {name} (ID: {existing.get('id')})")
+                    print(f"✅ Found existing product: {name} (ID: {existing['id']})")
                     return existing
-            
-            raise Exception(f"Failed to create product '{name}': {error_detail}")
+            raise Exception(f"Failed to create product '{name}': {e.error_code} - {e}")
     
-    async def find_product_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        """Find a product by name."""
+    def find_product_by_name(self, name: str) -> Optional[Dict]:
+        """Find a product by name using the SDK."""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    f"{self.base_url}/products",
-                    headers=self.headers,
-                    params={"per_page": 100}
-                )
-                response.raise_for_status()
-                data = response.json()
-                
-                products = data.get("data", [])
-                for product in products:
-                    if product.get("name") == name:
-                        return product
-                return None
+            products = self.paddle.products.list()
+            for product in products:
+                if product.name == name:
+                    return {
+                        "id": product.id,
+                        "name": product.name,
+                        "description": product.description
+                    }
+            return None
         except Exception as e:
             print(f"⚠️  Error finding product: {e}")
             return None
     
-    async def create_price(
+    def create_price(
         self,
         product_id: str,
         description: str,
@@ -169,9 +125,9 @@ class PaddleSetup:
         currency: str = "USD",
         billing_cycle: str = "month",  # "month" or "year"
         interval: int = 1
-    ) -> Dict[str, Any]:
+    ) -> Dict:
         """
-        Create a price for a product.
+        Create a price for a product using the SDK.
         
         Args:
             product_id: Product ID
@@ -184,45 +140,59 @@ class PaddleSetup:
         Returns:
             dict: Created price data
         """
-        url = f"{self.base_url}/prices"
-        
-        # Paddle API billing cycle structure
-        # Based on Paddle API docs: billing_cycle should be an object with interval and frequency
-        billing_cycle_obj = {
-            "interval": billing_cycle,  # "month" or "year"
-            "frequency": interval  # How many intervals (1 = every month/year)
-        }
-        
-        payload = {
-            "product_id": product_id,
-            "description": description,
-            "type": "standard",  # Standard price type
-            "billing_cycle": billing_cycle_obj,
-            "trial_period": None,  # No trial period
-            "tax_mode": "external",  # Tax handled externally
-            "unit_price": {
-                "amount": str(amount),
-                "currency_code": currency
-            }
-        }
-        
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url, json=payload, headers=self.headers)
-                response.raise_for_status()
-                data = response.json()
-                
-                price = data.get("data", {})
-                print(f"   ✅ Created price: {description} (ID: {price.get('id')}) - ${amount/100:.2f}/{billing_cycle}")
-                return price
-        except httpx.HTTPStatusError as e:
-            error_data = e.response.json() if e.response.content else {}
-            error_detail = error_data.get("detail", str(e))
-            raise Exception(f"Failed to create price '{description}': {error_detail}")
+            # Map billing cycle to Paddle's TimePeriod enum
+            if billing_cycle == "year":
+                billing_period = TimePeriod.Year
+            else:
+                billing_period = TimePeriod.Month
+            
+            # Create price using SDK
+            # Set quantity limits to lock quantity to 1 for subscriptions
+            # This prevents customers from changing quantity in checkout
+            # Reference: https://developer.paddle.com/build/checkout/pass-update-checkout-items
+            #
+            # IMPORTANT: VAT/TAX HANDLING
+            # - Paddle acts as Merchant of Record and handles ALL tax/VAT calculations
+            # - The 'amount' parameter should be the BASE PRICE (excluding VAT)
+            # - Paddle automatically adds VAT/tax based on customer's location
+            # - VAT is NOT deducted from your billing amount - it's added to customer's total
+            # - You receive the full base price amount, Paddle handles tax collection/remittance
+            # Reference: https://www.paddle.com/help/sell/tax/how-paddle-handles-vat-on-your-behalf
+            created_price = self.paddle.prices.create(CreatePrice(
+                product_id=product_id,
+                description=description,
+                unit_price={
+                    "amount": str(amount),  # Base price excluding VAT (e.g., $19.00 = 1900 cents)
+                    "currency_code": currency
+                },
+                billing_cycle={
+                    "interval": billing_period,
+                    "frequency": interval
+                },
+                quantity={
+                    "minimum": 1,
+                    "maximum": 1
+                }
+                # Note: tax_mode is not needed - Paddle handles tax automatically as Merchant of Record
+            ))
+            
+            print(f"   ✅ Created price: {description} (ID: {created_price.id}) - ${amount/100:.2f}/{billing_cycle}")
+            return {
+                "id": created_price.id,
+                "product_id": created_price.product_id,
+                "description": created_price.description,
+                "unit_price": {
+                    "amount": created_price.unit_price.amount,
+                    "currency_code": created_price.unit_price.currency_code
+                }
+            }
+        except ApiError as e:
+            raise Exception(f"Failed to create price '{description}': {e.error_code} - {e}")
     
-    async def setup_all_products(self) -> Dict[str, Dict[str, str]]:
+    def setup_all_products(self) -> Dict[str, Dict[str, str]]:
         """
-        Create all products and prices for ClientHunt.
+        Create all products and prices for ClientHunt using the SDK.
         
         Returns:
             dict: Dictionary mapping plan names to price IDs (monthly and yearly)
@@ -258,7 +228,7 @@ class PaddleSetup:
             print(f"\n📦 Creating {plan_data['name']} plan...")
             
             # Create product
-            product = await self.create_product(
+            product = self.create_product(
                 name=f"ClientHunt {plan_data['name']}",
                 description=plan_data['description']
             )
@@ -269,7 +239,7 @@ class PaddleSetup:
                 continue
             
             # Create monthly price
-            monthly_price = await self.create_price(
+            monthly_price = self.create_price(
                 product_id=product_id,
                 description=f"{plan_data['name']} - Monthly",
                 amount=plan_data['monthly_price'],
@@ -278,7 +248,7 @@ class PaddleSetup:
             )
             
             # Create yearly price
-            yearly_price = await self.create_price(
+            yearly_price = self.create_price(
                 product_id=product_id,
                 description=f"{plan_data['name']} - Yearly",
                 amount=plan_data['yearly_price'],
@@ -342,21 +312,13 @@ class PaddleSetup:
         print("\n")
 
 
-async def main():
+def main():
     """Main function to run the setup."""
     try:
         setup = PaddleSetup()
         
-        # Get vendor ID
-        print("🔍 Getting vendor ID...")
-        vendor_id = await setup.get_vendor_id()
-        if vendor_id:
-            print(f"✅ Vendor ID: {vendor_id}")
-        else:
-            print("⚠️  Vendor ID not found. Please set PADDLE_VENDOR_ID in .env")
-        
         # Setup all products and prices
-        price_ids = await setup.setup_all_products()
+        price_ids = setup.setup_all_products()
         
         # Save price IDs to database
         print("\n💾 Saving prices to database...")
@@ -404,8 +366,8 @@ async def main():
             print(f"    Yearly Price ID: {ids.get('yearly_price_id')}")
         
         print("\n💡 Next Steps:")
-        print("  1. Copy the price IDs from .env.paddle to your .env file")
-        print("  2. Update your .env with PADDLE_VENDOR_ID if not set")
+        print("  1. Copy the price IDs from .env.paddle to your .env file (optional)")
+        print("  2. Prices are already saved to the database")
         print("  3. Restart your backend service")
         print("\n")
         
@@ -417,5 +379,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    main()

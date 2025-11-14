@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30  # 30 days
     
     # Paddle Payment Gateway (PRIMARY)
+    PADDLE_ENABLED: bool = True  # Set to False to disable Paddle payment gateway
     PADDLE_API_KEY: str = ""
     PADDLE_VENDOR_ID: str = ""
     PADDLE_ENVIRONMENT: str = "sandbox"  # or "live"

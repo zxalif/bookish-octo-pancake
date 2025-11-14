@@ -15,7 +15,7 @@ from slowapi.errors import RateLimitExceeded
 from core.config import get_settings
 from core.logger import get_logger, setup_logging
 from api.middleware.rate_limit import limiter, _rate_limit_exceeded_handler
-from api.routes import auth, users, subscriptions, payments, keyword_searches, opportunities, usage, prices, cleanup, support
+from api.routes import auth, users, subscriptions, payments, keyword_searches, opportunities, usage, prices, cleanup, support, subscription_jobs
 
 # Initialize centralized logging (must be done before importing routes)
 setup_logging()
@@ -250,6 +250,7 @@ app.include_router(opportunities.router, prefix="/api/v1/opportunities", tags=["
 app.include_router(usage.router, prefix="/api/v1/usage", tags=["Usage"])
 app.include_router(cleanup.router, prefix="/api/v1/cleanup", tags=["Cleanup"])
 app.include_router(support.router, prefix="/api/v1/support", tags=["Support"])
+app.include_router(subscription_jobs.router, prefix="/api/v1/subscription-jobs", tags=["Subscription Jobs"])
 
 
 # Global exception handler
