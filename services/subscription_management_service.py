@@ -11,7 +11,7 @@ Handles subscription lifecycle management:
 """
 
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
@@ -87,14 +87,38 @@ class SubscriptionManagementService:
                     }
                     
                     paddle_status = getattr(paddle_sub, 'status', None)
-                    if paddle_status and paddle_status in status_map:
-                        new_status = status_map[paddle_status]
-                        if subscription.status != new_status:
-                            subscription.status = new_status
-                            updated_count += 1
-                            logger.info(
-                                f"Updated subscription {subscription.id} status: "
-                                f"{subscription.status.value} -> {new_status.value}"
+                    # Convert enum to string if needed (Paddle SDK returns enum objects)
+                    if paddle_status is not None:
+                        # Handle both enum objects (with .value) and string values
+                        try:
+                            if hasattr(paddle_status, 'value'):
+                                # Get the value attribute (could be string or another enum)
+                                status_value = paddle_status.value
+                                # If it's still an enum, get its value recursively
+                                if hasattr(status_value, 'value'):
+                                    paddle_status_str = str(status_value.value).lower()
+                                else:
+                                    paddle_status_str = str(status_value).lower()
+                            else:
+                                # It's already a string or other type
+                                paddle_status_str = str(paddle_status).lower()
+                            
+                            # Clean up the string (remove any enum class prefixes)
+                            paddle_status_str = paddle_status_str.replace('subscriptionstatus.', '').replace('status.', '')
+                            
+                            if paddle_status_str in status_map:
+                                new_status = status_map[paddle_status_str]
+                                if subscription.status != new_status:
+                                    subscription.status = new_status
+                                    updated_count += 1
+                                    logger.info(
+                                        f"Updated subscription {subscription.id} status: "
+                                        f"{subscription.status.value} -> {new_status.value}"
+                                    )
+                        except Exception as e:
+                            logger.warning(
+                                f"Error processing paddle_status for subscription {subscription.id}: {str(e)}, "
+                                f"paddle_status type: {type(paddle_status)}, value: {paddle_status}"
                             )
                     
                     # Update billing period dates if available
@@ -104,16 +128,43 @@ class SubscriptionManagementService:
                         if period:
                             if hasattr(period, 'starts_at') and period.starts_at:
                                 new_period_start = period.starts_at
+                                
+                                # Normalize datetimes to UTC-aware for comparison
+                                # Database datetime is naive (UTC), Paddle datetime may be aware
+                                if old_period_start:
+                                    # Ensure old_period_start is timezone-aware (UTC)
+                                    if old_period_start.tzinfo is None:
+                                        old_period_start_aware = old_period_start.replace(tzinfo=timezone.utc)
+                                    else:
+                                        old_period_start_aware = old_period_start.astimezone(timezone.utc)
+                                else:
+                                    old_period_start_aware = None
+                                
+                                # Ensure new_period_start is timezone-aware (UTC)
+                                if new_period_start.tzinfo is None:
+                                    new_period_start_aware = new_period_start.replace(tzinfo=timezone.utc)
+                                else:
+                                    new_period_start_aware = new_period_start.astimezone(timezone.utc)
+                                
                                 # Check if billing period renewed (new period started)
-                                if old_period_start and new_period_start > old_period_start:
+                                if old_period_start_aware and new_period_start_aware > old_period_start_aware:
                                     # Billing period renewed - reset keyword search limits
                                     SubscriptionManagementService.reset_keyword_search_limits_on_renewal(
                                         subscription, db
                                     )
-                                subscription.current_period_start = new_period_start
+                                
+                                # Store as naive datetime (database expects naive UTC)
+                                subscription.current_period_start = new_period_start_aware.replace(tzinfo=None)
                             if hasattr(period, 'ends_at') and period.ends_at:
-                                subscription.current_period_end = period.ends_at
-                                subscription.next_billing_date = period.ends_at
+                                period_ends_at = period.ends_at
+                                # Normalize to UTC-aware, then convert to naive for database
+                                if period_ends_at.tzinfo is None:
+                                    period_ends_at_aware = period_ends_at.replace(tzinfo=timezone.utc)
+                                else:
+                                    period_ends_at_aware = period_ends_at.astimezone(timezone.utc)
+                                # Store as naive datetime (database expects naive UTC)
+                                subscription.current_period_end = period_ends_at_aware.replace(tzinfo=None)
+                                subscription.next_billing_date = period_ends_at_aware.replace(tzinfo=None)
                     
                     synced_count += 1
                     
@@ -240,17 +291,25 @@ class SubscriptionManagementService:
                         paddle_sub = paddle.subscriptions.get(subscription.paddle_subscription_id)
                         paddle_status = getattr(paddle_sub, 'status', None)
                         
-                        if paddle_status == "active":
-                            subscription.status = SubscriptionStatus.ACTIVE
-                            subscription.last_billing_status = "completed"
-                            retried_count += 1
-                            logger.info(f"Subscription {subscription.id} payment retried successfully")
-                        elif paddle_status == "past_due":
-                            # Still past_due, Paddle will retry
-                            logger.info(f"Subscription {subscription.id} still past_due, Paddle will retry")
-                        elif paddle_status == "canceled":
-                            subscription.status = SubscriptionStatus.CANCELLED
-                            logger.info(f"Subscription {subscription.id} cancelled by Paddle")
+                        # Convert enum to string if needed (Paddle SDK returns enum objects)
+                        if paddle_status:
+                            # Handle both enum objects (with .value) and string values
+                            if hasattr(paddle_status, 'value'):
+                                paddle_status_str = paddle_status.value
+                            else:
+                                paddle_status_str = str(paddle_status).lower()
+                            
+                            if paddle_status_str == "active":
+                                subscription.status = SubscriptionStatus.ACTIVE
+                                subscription.last_billing_status = "completed"
+                                retried_count += 1
+                                logger.info(f"Subscription {subscription.id} payment retried successfully")
+                            elif paddle_status_str == "past_due":
+                                # Still past_due, Paddle will retry
+                                logger.info(f"Subscription {subscription.id} still past_due, Paddle will retry")
+                            elif paddle_status_str == "canceled":
+                                subscription.status = SubscriptionStatus.CANCELLED
+                                logger.info(f"Subscription {subscription.id} cancelled by Paddle")
                     except Exception as e:
                         logger.warning(f"Error syncing past_due subscription {subscription.id}: {str(e)}")
                 
