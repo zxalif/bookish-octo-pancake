@@ -14,6 +14,7 @@ from models.opportunity import Opportunity, OpportunityStatus
 from models.price import Price, BillingPeriod
 from models.support_thread import SupportThread, ThreadStatus
 from models.support_message import SupportMessage, MessageSender
+from models.page_visit import PageVisit
 from models.base import generate_uuid, TimestampMixin, SoftDeleteMixin
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "ThreadStatus",
     "SupportMessage",
     "MessageSender",
+    "PageVisit",
     "generate_uuid",
     "TimestampMixin",
     "SoftDeleteMixin",

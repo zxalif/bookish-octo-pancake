@@ -25,6 +25,8 @@ from models.keyword_search import KeywordSearch
 from models.opportunity import Opportunity
 from models.support_thread import SupportThread, ThreadStatus
 from models.support_message import SupportMessage, MessageSender
+from models.user_audit_log import UserAuditLog
+from models.page_visit import PageVisit
 from services.admin_analytics_service import AdminAnalyticsService
 from services.support_service import SupportService
 from services.email_service import EmailService
@@ -85,6 +87,20 @@ class ReplyToThreadRequest(BaseModel):
 class UpdateThreadStatusRequest(BaseModel):
     """Update thread status request model."""
     status: ThreadStatus
+
+class AuditLogListResponse(BaseModel):
+    """Audit log list response model."""
+    logs: List[dict]
+    total: int
+    page: int
+    limit: int
+
+class PageVisitListResponse(BaseModel):
+    """Page visit list response model."""
+    visits: List[dict]
+    total: int
+    page: int
+    limit: int
 
 # ===== User Management =====
 
@@ -979,3 +995,419 @@ async def update_thread_status(
     db.commit()
     
     return {"message": "Thread status updated successfully", "status": status_data.status.value}
+
+
+# ===== Audit Logs =====
+
+@router.get("/audit-logs", response_model=AuditLogListResponse)
+@limiter.limit("100/minute")
+async def list_audit_logs(
+    request: Request,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    action: Optional[str] = Query(None, description="Filter by action type"),
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
+    search: Optional[str] = Query(None, max_length=100, description="Search in details or user agent"),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    List audit logs with filtering and pagination.
+    
+    **Admin only**
+    
+    **Query Parameters:**
+    - `skip`: Number of records to skip (default: 0)
+    - `limit`: Number of records to return (default: 50, max: 100)
+    - `user_id`: Filter by user ID
+    - `action`: Filter by action type (e.g., "register", "login", "update_profile")
+    - `start_date`: Filter logs from this date (ISO format)
+    - `end_date`: Filter logs until this date (ISO format)
+    - `search`: Search in details or user agent (max 100 characters)
+    
+    **Response 200**: List of audit logs
+    **Response 403**: Not an admin
+    """
+    # Build query
+    query = db.query(UserAuditLog)
+    
+    # Apply filters
+    if user_id:
+        query = query.filter(UserAuditLog.user_id == user_id)
+    
+    if action:
+        # Sanitize action input (limit to 50 chars, alphanumeric and underscore only)
+        sanitized_action = ''.join(c for c in action[:50] if c.isalnum() or c == '_')
+        if sanitized_action:
+            query = query.filter(UserAuditLog.action == sanitized_action)
+    
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(UserAuditLog.created_at >= start_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid start_date format. Use ISO format."
+            )
+    
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(UserAuditLog.created_at <= end_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid end_date format. Use ISO format."
+            )
+    
+    if search:
+        # Sanitize search input
+        sanitized_search = search[:100].strip()
+        if sanitized_search:
+            search_filter = or_(
+                UserAuditLog.details.ilike(f"%{sanitized_search}%"),
+                UserAuditLog.user_agent.ilike(f"%{sanitized_search}%")
+            )
+            query = query.filter(search_filter)
+    
+    # Get total count
+    total = query.count()
+    
+    # Apply pagination and ordering
+    logs = query.order_by(UserAuditLog.created_at.desc()).offset(skip).limit(limit).all()
+    
+    # Format response
+    logs_data = []
+    for log in logs:
+        # Get user email for display
+        user = db.query(User).filter(User.id == log.user_id).first()
+        user_email = user.email if user else None
+        
+        log_dict = log.to_dict()
+        log_dict["user_email"] = user_email
+        logs_data.append(log_dict)
+    
+    # SECURITY: Log admin action
+    logger.info(
+        f"Admin action: list_audit_logs",
+        extra={
+            "admin_user_id": admin_user.id,
+            "admin_email": admin_user.email,
+            "filters": {
+                "user_id": user_id,
+                "action": action,
+                "start_date": start_date,
+                "end_date": end_date,
+                "search": search[:50] if search else None,
+            },
+            "result_count": len(logs_data),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+    
+    return {
+        "logs": logs_data,
+        "total": total,
+        "page": (skip // limit) + 1,
+        "limit": limit
+    }
+
+
+@router.get("/audit-logs/{log_id}")
+@limiter.limit("100/minute")
+async def get_audit_log(
+    request: Request,
+    log_id: str,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get a specific audit log entry.
+    
+    **Admin only**
+    
+    **Response 200**: Audit log details
+    **Response 404**: Log not found
+    **Response 403**: Not an admin
+    """
+    log = db.query(UserAuditLog).filter(UserAuditLog.id == log_id).first()
+    
+    if not log:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Audit log not found"
+        )
+    
+    # Get user details
+    user = db.query(User).filter(User.id == log.user_id).first()
+    
+    log_dict = log.to_dict()
+    log_dict["user_email"] = user.email if user else None
+    log_dict["user_full_name"] = user.full_name if user else None
+    
+    return log_dict
+
+
+# ===== Page Visits =====
+
+@router.get("/page-visits", response_model=PageVisitListResponse)
+@limiter.limit("100/minute")
+async def list_page_visits(
+    request: Request,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    page_path: Optional[str] = Query(None, description="Filter by page path"),
+    utm_source: Optional[str] = Query(None, description="Filter by UTM source"),
+    utm_medium: Optional[str] = Query(None, description="Filter by UTM medium"),
+    utm_campaign: Optional[str] = Query(None, description="Filter by UTM campaign"),
+    device_type: Optional[str] = Query(None, description="Filter by device type"),
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
+    search: Optional[str] = Query(None, max_length=100, description="Search in referrer or user agent"),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    List page visits with filtering and pagination.
+    
+    **Admin only**
+    
+    **Query Parameters:**
+    - `skip`: Number of records to skip (default: 0)
+    - `limit`: Number of records to return (default: 50, max: 100)
+    - `page_path`: Filter by page path (e.g., "/", "/pricing")
+    - `utm_source`: Filter by UTM source
+    - `utm_medium`: Filter by UTM medium
+    - `utm_campaign`: Filter by UTM campaign
+    - `device_type`: Filter by device type (mobile, tablet, desktop)
+    - `start_date`: Filter visits from this date (ISO format)
+    - `end_date`: Filter visits until this date (ISO format)
+    - `search`: Search in referrer or user agent (max 100 characters)
+    
+    **Response 200**: List of page visits
+    **Response 403**: Not an admin
+    """
+    # Build query
+    query = db.query(PageVisit)
+    
+    # Apply filters
+    if page_path:
+        query = query.filter(PageVisit.page_path == page_path)
+    
+    if utm_source:
+        sanitized_source = ''.join(c for c in utm_source[:100] if c.isalnum() or c in ['-', '_'])
+        if sanitized_source:
+            query = query.filter(PageVisit.utm_source == sanitized_source)
+    
+    if utm_medium:
+        sanitized_medium = ''.join(c for c in utm_medium[:100] if c.isalnum() or c in ['-', '_'])
+        if sanitized_medium:
+            query = query.filter(PageVisit.utm_medium == sanitized_medium)
+    
+    if utm_campaign:
+        sanitized_campaign = ''.join(c for c in utm_campaign[:100] if c.isalnum() or c in ['-', '_'])
+        if sanitized_campaign:
+            query = query.filter(PageVisit.utm_campaign == sanitized_campaign)
+    
+    if device_type:
+        if device_type in ['mobile', 'tablet', 'desktop']:
+            query = query.filter(PageVisit.device_type == device_type)
+    
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(PageVisit.created_at >= start_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid start_date format. Use ISO format."
+            )
+    
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(PageVisit.created_at <= end_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid end_date format. Use ISO format."
+            )
+    
+    if search:
+        # Sanitize search input
+        sanitized_search = search[:100].strip()
+        if sanitized_search:
+            search_filter = or_(
+                PageVisit.referrer.ilike(f"%{sanitized_search}%"),
+                PageVisit.user_agent.ilike(f"%{sanitized_search}%")
+            )
+            query = query.filter(search_filter)
+    
+    # Get total count
+    total = query.count()
+    
+    # Apply pagination and ordering
+    visits = query.order_by(PageVisit.created_at.desc()).offset(skip).limit(limit).all()
+    
+    # Format response
+    visits_data = []
+    for visit in visits:
+        visit_dict = visit.to_dict()
+        # Get user email if user_id exists
+        if visit.user_id:
+            user = db.query(User).filter(User.id == visit.user_id).first()
+            visit_dict["user_email"] = user.email if user else None
+        else:
+            visit_dict["user_email"] = None
+        visits_data.append(visit_dict)
+    
+    # SECURITY: Log admin action
+    logger.info(
+        f"Admin action: list_page_visits",
+        extra={
+            "admin_user_id": admin_user.id,
+            "admin_email": admin_user.email,
+            "filters": {
+                "page_path": page_path,
+                "utm_source": utm_source,
+                "device_type": device_type,
+                "start_date": start_date,
+                "end_date": end_date,
+                "search": search[:50] if search else None,
+            },
+            "result_count": len(visits_data),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+    
+    return {
+        "visits": visits_data,
+        "total": total,
+        "page": (skip // limit) + 1,
+        "limit": limit
+    }
+
+
+@router.get("/page-visits/stats")
+@limiter.limit("100/minute")
+async def get_page_visit_stats(
+    request: Request,
+    start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
+    end_date: Optional[str] = Query(None, description="End date (ISO format)"),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get page visit statistics.
+    
+    Returns aggregated statistics about page visits.
+    
+    **Admin only**
+    
+    **Response 200**: Visit statistics
+    **Response 403**: Not an admin
+    """
+    try:
+        query = db.query(PageVisit)
+        
+        # Apply date filters
+        if start_date:
+            try:
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(PageVisit.created_at >= start_dt)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date format. Use ISO format."
+                )
+        
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(PageVisit.created_at <= end_dt)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_date format. Use ISO format."
+                )
+        
+        # Get counts
+        total_visits = query.count()
+        
+        # Get unique IPs
+        unique_ips = db.query(PageVisit.ip_address).distinct().count()
+        
+        # Get unique sessions
+        unique_sessions = db.query(PageVisit.session_id).filter(PageVisit.session_id.isnot(None)).distinct().count()
+        
+        # Get top pages
+        from sqlalchemy import func
+        top_pages = (
+            db.query(
+                PageVisit.page_path,
+                func.count(PageVisit.id).label('count')
+            )
+            .group_by(PageVisit.page_path)
+            .order_by(func.count(PageVisit.id).desc())
+            .limit(10)
+            .all()
+        )
+        
+        # Get top referrers
+        top_referrers = (
+            db.query(
+                PageVisit.referrer,
+                func.count(PageVisit.id).label('count')
+            )
+            .filter(PageVisit.referrer.isnot(None))
+            .group_by(PageVisit.referrer)
+            .order_by(func.count(PageVisit.id).desc())
+            .limit(10)
+            .all()
+        )
+        
+        # Get device type breakdown
+        device_breakdown = (
+            db.query(
+                PageVisit.device_type,
+                func.count(PageVisit.id).label('count')
+            )
+            .filter(PageVisit.device_type.isnot(None))
+            .group_by(PageVisit.device_type)
+            .all()
+        )
+        
+        # Get UTM source breakdown
+        utm_source_breakdown = (
+            db.query(
+                PageVisit.utm_source,
+                func.count(PageVisit.id).label('count')
+            )
+            .filter(PageVisit.utm_source.isnot(None))
+            .group_by(PageVisit.utm_source)
+            .order_by(func.count(PageVisit.id).desc())
+            .limit(10)
+            .all()
+        )
+        
+        return {
+            "total_visits": total_visits,
+            "unique_ips": unique_ips,
+            "unique_sessions": unique_sessions,
+            "top_pages": [{"page_path": path, "count": count} for path, count in top_pages],
+            "top_referrers": [{"referrer": ref, "count": count} for ref, count in top_referrers],
+            "device_breakdown": [{"device_type": device, "count": count} for device, count in device_breakdown],
+            "utm_source_breakdown": [{"utm_source": source, "count": count} for source, count in utm_source_breakdown],
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting page visit stats: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get page visit statistics"
+        )

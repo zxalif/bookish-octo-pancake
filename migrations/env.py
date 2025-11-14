@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import get_settings
 from core.database import Base
-from models import User, UserAuditLog, Subscription, Payment, UsageMetric, KeywordSearch, Opportunity, SupportThread, SupportMessage
+from models import User, UserAuditLog, Subscription, Payment, UsageMetric, KeywordSearch, Opportunity, SupportThread, SupportMessage, PageVisit
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
