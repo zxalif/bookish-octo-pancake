@@ -145,11 +145,22 @@ async def create_paddle_checkout(
         
         return CheckoutResponse(**result)
     except ValueError as e:
+        error_message = str(e)
+        error_code = "validation_error"
+        
+        # Transform technical error messages to user-friendly ones
+        if "Paddle payment gateway is disabled" in error_message:
+            error_message = "Payment processing is currently unavailable. Please contact support@clienthunt.app for assistance."
+            error_code = "paddle_disabled"
+        elif "PADDLE_ENABLED" in error_message or "PADDLE_API_KEY" in error_message:
+            error_message = "Payment processing is temporarily unavailable. Please contact support@clienthunt.app for assistance."
+            error_code = "paddle_disabled"
+        
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
-                "message": str(e),
-                "error_code": "validation_error"
+                "message": error_message,
+                "error_code": error_code
             }
         )
     except HTTPException as e:

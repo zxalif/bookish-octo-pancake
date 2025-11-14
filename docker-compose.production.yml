@@ -33,7 +33,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=1440
       
       # Paddle Payment Gateway
-      - PADDLE_ENABLED=${PADDLE_ENABLED:-true}
+      - PADDLE_ENABLED=${PADDLE_ENABLED:-false}
       - PADDLE_API_KEY=${PADDLE_API_KEY}
       - PADDLE_VENDOR_ID=${PADDLE_VENDOR_ID}
       - PADDLE_ENVIRONMENT=${PADDLE_ENVIRONMENT:-live}
