@@ -217,6 +217,13 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    # Check if user is banned
+    if user.is_banned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been banned. Please contact support for assistance.",
+        )
+    
     # Check if email is verified
     if not user.is_verified:
         raise HTTPException(
@@ -236,10 +243,38 @@ async def login(
     db.add(audit_log)
     db.commit()
     
-    return AuthService.create_token_for_user(user)
+    # Generate CSRF token
+    from core.csrf import generate_csrf_token, store_csrf_token
+    from core.config import get_settings
+    settings = get_settings()
+    csrf_token = generate_csrf_token()
+    store_csrf_token(user.id, csrf_token, expires_in=3600)  # 1 hour expiration
+    
+    # Create response with tokens
+    token_data = AuthService.create_token_for_user(user)
+    
+    # Add CSRF token to response
+    token_data["csrf_token"] = csrf_token
+    
+    # Create response with CSRF token in cookie
+    from fastapi.responses import JSONResponse
+    response = JSONResponse(content=token_data)
+    
+    # Set CSRF token in cookie with SameSite=Strict (not httpOnly so JS can read it)
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,  # Allow JavaScript to read it for X-CSRF-Token header
+        samesite="strict",  # Prevent CSRF attacks
+        secure=settings.ENVIRONMENT == "production",  # HTTPS only in production
+        max_age=3600,  # 1 hour
+        path="/"  # Available for all paths
+    )
+    
+    return response
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me", response_model=UserResponse, response_model_exclude_none=True)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user)
 ):
@@ -255,7 +290,21 @@ async def get_current_user_info(
     
     **Response 401**: Not authenticated
     """
-    return current_user.to_dict()
+    # SECURITY: Only include is_admin if user is actually an admin
+    user_dict = current_user.to_dict()
+    
+    # Build response dict, excluding None values
+    user_data = {
+        "id": user_dict["id"],
+        "email": user_dict["email"],
+        "full_name": user_dict["full_name"],
+    }
+    
+    # Only add is_admin if user is admin
+    if current_user.is_admin:
+        user_data["is_admin"] = True
+    
+    return user_data
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -488,9 +537,17 @@ async def verify_email(
     
     # Check if already verified
     if user_by_id.is_verified:
+        user_dict = user_by_id.to_dict()
+        user_data = {
+            "id": user_dict["id"],
+            "email": user_dict["email"],
+            "full_name": user_dict["full_name"],
+        }
+        if user_by_id.is_admin:
+            user_data["is_admin"] = True
         return {
             "message": "Email already verified",
-            "user": user_by_id.to_dict()
+            "user": user_data
         }
     
     # Verify token and get user
@@ -558,9 +615,17 @@ async def verify_email(
         logger.error(f"Error sending welcome email to {user.email}: {str(e)}", exc_info=True)
         # Don't fail verification if email sending fails
     
+    user_dict = user.to_dict()
+    user_data = {
+        "id": user_dict["id"],
+        "email": user_dict["email"],
+        "full_name": user_dict["full_name"],
+    }
+    if user.is_admin:
+        user_data["is_admin"] = True
     return {
         "message": "Email verified successfully. Welcome email sent!",
-        "user": user.to_dict()
+        "user": user_data
     }
 
 

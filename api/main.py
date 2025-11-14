@@ -15,7 +15,7 @@ from slowapi.errors import RateLimitExceeded
 from core.config import get_settings
 from core.logger import get_logger, setup_logging
 from api.middleware.rate_limit import limiter, _rate_limit_exceeded_handler
-from api.routes import auth, users, subscriptions, payments, keyword_searches, opportunities, usage, prices, cleanup, support, subscription_jobs
+from api.routes import auth, users, subscriptions, payments, keyword_searches, opportunities, usage, prices, cleanup, support, subscription_jobs, admin, csrf
 
 # Initialize centralized logging (must be done before importing routes)
 setup_logging()
@@ -48,13 +48,14 @@ if settings.SENTRY_ENABLED and settings.SENTRY_DSN:
         logger.warning(f"Failed to initialize Sentry: {str(e)}")
 
 # Create FastAPI application
+# SECURITY: Disable API docs in production to prevent exposing admin endpoints
 app = FastAPI(
     title=settings.APP_NAME,
     description="Freelancer Opportunity Finder - Reddit-First Lead Generation Platform",
     version=settings.APP_VERSION,
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    docs_url="/docs" if settings.DEBUG else None,  # Only enable in development
+    redoc_url="/redoc" if settings.DEBUG else None,  # Only enable in development
+    openapi_url="/openapi.json" if settings.DEBUG else None  # Only enable in development
 )
 
 # Attach rate limiter to app state (for backward compatibility if needed)
@@ -68,7 +69,7 @@ app.add_middleware(
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],  # Only needed methods
-    allow_headers=["Content-Type", "Authorization", "X-Service-Token"],  # Only needed headers
+    allow_headers=["Content-Type", "Authorization", "X-Service-Token", "X-CSRF-Token"],  # Include CSRF token header
 )
 
 
@@ -251,6 +252,8 @@ app.include_router(usage.router, prefix="/api/v1/usage", tags=["Usage"])
 app.include_router(cleanup.router, prefix="/api/v1/cleanup", tags=["Cleanup"])
 app.include_router(support.router, prefix="/api/v1/support", tags=["Support"])
 app.include_router(subscription_jobs.router, prefix="/api/v1/subscription-jobs", tags=["Subscription Jobs"])
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
+app.include_router(csrf.router, prefix="/api/v1", tags=["CSRF"])
 
 
 # Global exception handler

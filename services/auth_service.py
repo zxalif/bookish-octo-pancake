@@ -154,11 +154,26 @@ class AuthService:
                 refresh_token
             )
         
+        # Build user dict - only include is_admin if user is admin
+        user_dict = user.to_dict()
+        
+        # Build response dict, excluding None values
+        response_user = {
+            "id": user_dict["id"],
+            "email": user_dict["email"],
+            "full_name": user_dict["full_name"],
+        }
+        
+        # SECURITY: Only include is_admin if user is actually an admin
+        if user.is_admin:
+            response_user["is_admin"] = True
+        # If not admin, don't include the field in the response
+        
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "user": user.to_dict()
+            "user": response_user
         }
     
     @staticmethod

@@ -6,7 +6,7 @@ Provides authentication, database session, and other common dependencies.
 """
 
 from typing import Optional
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from models.user import User
 from models.subscription import Subscription
 from services.auth_service import AuthService
 from services.subscription_service import SubscriptionService
+from core.csrf import require_csrf_token
 
 # HTTP Bearer token security scheme
 security = HTTPBearer()
@@ -78,6 +79,13 @@ def get_current_user(
             detail="Inactive user"
         )
     
+    # Check if user is banned
+    if user.is_banned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been banned. Please contact support for assistance."
+        )
+    
     return user
 
 
@@ -125,6 +133,59 @@ def get_optional_current_user(
         return None
 
 
+def get_admin_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """
+    Dependency to get current admin user.
+    
+    This dependency requires the user to be an admin (is_admin=True).
+    Used for admin-only endpoints.
+    
+    Args:
+        current_user: Current authenticated user from get_current_user dependency
+        
+    Returns:
+        User: Current admin user
+        
+    Raises:
+        HTTPException: If user is not an admin (403 Forbidden)
+    """
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    return current_user
+
+
+def require_csrf_protection(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """
+    Dependency that requires valid CSRF token for authenticated users.
+    
+    This should be used on state-changing endpoints (POST, PUT, DELETE, PATCH)
+    to prevent CSRF attacks.
+    
+    Args:
+        request: FastAPI request object
+        current_user: Current authenticated user
+        
+    Returns:
+        User: Current authenticated user (if CSRF token is valid)
+        
+    Raises:
+        HTTPException: If CSRF token is invalid (403 Forbidden)
+    """
+    # Validate CSRF token
+    require_csrf_token(request, current_user.id)
+    
+    return current_user
+
+
 def require_active_subscription(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -152,4 +213,3 @@ def require_active_subscription(
         subscription = SubscriptionService.create_free_subscription(current_user.id, db)
     
     return subscription
-

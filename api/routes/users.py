@@ -62,17 +62,20 @@ class UserResponse(BaseModel):
     - email: User email address
     - full_name: User's display name
     - subscription: Active subscription information (if any)
+    - is_admin: Admin status (ONLY included if user is admin, for security)
     
     Note: is_active, is_verified, created_at, updated_at are excluded
     as they are not used by the frontend and are handled server-side.
+    SECURITY: is_admin is only included if the user is actually an admin.
     """
     id: str
     email: str
     full_name: str
     subscription: SubscriptionInfo | None = None
+    is_admin: bool | None = None  # Optional - only set if user is admin
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me", response_model=UserResponse, response_model_exclude_none=True)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -114,7 +117,25 @@ async def get_current_user_info(
     else:
         user_data["subscription"] = None
     
-    return user_data
+    # SECURITY: Only include is_admin if user is actually an admin
+    # This prevents non-admin users from seeing the field at all
+    if current_user.is_admin:
+        user_data["is_admin"] = True
+    # If not admin, don't include the field in the response dict
+    
+    # Build response, excluding None values (except subscription which can be None)
+    response_data = {
+        "id": user_data["id"],
+        "email": user_data["email"],
+        "full_name": user_data["full_name"],
+        "subscription": user_data.get("subscription"),  # Can be None
+    }
+    
+    # Only add is_admin if it was set (user is admin)
+    if "is_admin" in user_data:
+        response_data["is_admin"] = user_data["is_admin"]
+    
+    return response_data
 
 
 @router.put("/me", response_model=UserResponse)
