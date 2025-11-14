@@ -59,7 +59,7 @@ services:
       - FRONTEND_URL=${FRONTEND_URL:-https://clienthunt.app}
       
       # CORS Configuration
-      - CORS_ORIGINS=${CORS_ORIGINS:-https://clienthunt.app,https://www.clienthunt.app}
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://clienthunt.app,https://www.clienthunt.app,https://admin.clienthunt.app}
       
       # Redis Cache (Native Redis on host)
       - REDIS_URL=${REDIS_URL}
