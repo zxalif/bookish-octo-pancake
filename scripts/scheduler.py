@@ -28,6 +28,8 @@ from core.logger import get_logger, setup_logging
 from core.config import get_settings
 from services.subscription_management_service import SubscriptionManagementService
 from services.cleanup_service import CleanupService
+from services.lead_refresh_service import LeadRefreshService
+import asyncio
 
 # Initialize logging
 setup_logging()
@@ -179,6 +181,38 @@ def monthly_cleanup_job():
         db.close()
 
 
+def cleanup_old_page_visits_job():
+    """Cleanup old page visits (run daily at 2:10 AM)."""
+    db = SessionLocal()
+    try:
+        return run_job(
+            "cleanup_old_page_visits",
+            CleanupService.cleanup_old_page_visits,
+            db,
+            months_old=3
+        )
+    finally:
+        db.close()
+
+
+def refresh_leads_job():
+    """Refresh leads from Rixly and send email notifications (run every 6 hours)."""
+    db = SessionLocal()
+    try:
+        # Run async function in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                LeadRefreshService.refresh_leads_for_all_users(db)
+            )
+            return result
+        finally:
+            loop.close()
+    finally:
+        db.close()
+
+
 def should_run_job(job_name: str, current_hour: int, current_minute: int, current_day: int) -> bool:
     """
     Determine if a job should run based on current time.
@@ -197,8 +231,10 @@ def should_run_job(job_name: str, current_hour: int, current_minute: int, curren
         "refresh_usage_metrics": lambda h, m, d: h == 0 and m == 0,  # Daily at midnight
         "process_expired_subscriptions": lambda h, m, d: h == 2 and m == 0,  # Daily at 2 AM
         "cleanup_old_searches": lambda h, m, d: h == 2 and m == 5,  # Daily at 2:05 AM
+        "cleanup_old_page_visits": lambda h, m, d: h == 2 and m == 10,  # Daily at 2:10 AM
         "process_past_due_subscriptions": lambda h, m, d: h == 3 and m == 0,  # Daily at 3 AM
         "check_upcoming_renewals": lambda h, m, d: h == 9 and m == 0,  # Daily at 9 AM
+        "refresh_leads": lambda h, m, d: h in [0, 6, 12, 18] and m == 0,  # Every 6 hours at minute 0
         "monthly_cleanup": lambda h, m, d: d == 1 and h == 0 and m == 1,  # 1st of month at 00:01
     }
     
@@ -361,6 +397,20 @@ def main():
                    (now - last_run_times["cleanup_old_searches"]).days >= 1:
                     if submit_job("cleanup_old_searches", cleanup_old_searches_job):
                         last_run_times["cleanup_old_searches"] = now
+            
+            # Cleanup old page visits (daily at 2:10 AM)
+            if should_run_job("cleanup_old_page_visits", current_hour, current_minute, current_day):
+                if "cleanup_old_page_visits" not in last_run_times or \
+                   (now - last_run_times["cleanup_old_page_visits"]).days >= 1:
+                    if submit_job("cleanup_old_page_visits", cleanup_old_page_visits_job):
+                        last_run_times["cleanup_old_page_visits"] = now
+            
+            # Refresh leads from Rixly (every 6 hours)
+            if should_run_job("refresh_leads", current_hour, current_minute, current_day):
+                if "refresh_leads" not in last_run_times or \
+                   (now - last_run_times["refresh_leads"]).total_seconds() >= 21600:  # 6 hours
+                    if submit_job("refresh_leads", refresh_leads_job):
+                        last_run_times["refresh_leads"] = now
             
             # Process past_due subscriptions (daily at 3 AM)
             if should_run_job("process_past_due_subscriptions", current_hour, current_minute, current_day):

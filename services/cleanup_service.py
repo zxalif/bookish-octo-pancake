@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from models.keyword_search import KeywordSearch
+from models.page_visit import PageVisit
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -93,6 +94,41 @@ class CleanupService:
             )
         else:
             logger.debug("No previous month soft-deleted searches to clean up")
+        
+        return count
+    
+    @staticmethod
+    def cleanup_old_page_visits(db: Session, months_old: int = 3) -> int:
+        """
+        Delete page visits older than specified number of months.
+        
+        This helps keep the database size manageable by removing old analytics data.
+        
+        Args:
+            db: Database session
+            months_old: Delete visits older than this many months (default: 3)
+            
+        Returns:
+            int: Number of page visits deleted
+        """
+        cutoff_date = datetime.utcnow() - timedelta(days=months_old * 30)  # Approximate months
+        
+        # Find page visits older than cutoff date
+        old_visits = db.query(PageVisit).filter(
+            PageVisit.created_at < cutoff_date  # type: ignore
+        ).all()
+        
+        count = len(old_visits)
+        
+        if count > 0:
+            # Delete them
+            for visit in old_visits:
+                db.delete(visit)
+            
+            db.commit()
+            logger.info(f"Deleted {count} page visits older than {months_old} months (created before {cutoff_date})")
+        else:
+            logger.debug(f"No page visits older than {months_old} months to clean up")
         
         return count
 

@@ -29,12 +29,14 @@ class UserUpdate(BaseModel):
     through a secure email verification flow (not yet implemented).
     """
     full_name: str | None = None
+    email_notifications_enabled: bool | None = None
     # Email removed for security - email changes require verification flow
     
     class Config:
         json_schema_extra = {
             "example": {
-                "full_name": "John Doe Updated"
+                "full_name": "John Doe Updated",
+                "email_notifications_enabled": True
             }
         }
 
@@ -63,6 +65,7 @@ class UserResponse(BaseModel):
     - full_name: User's display name
     - subscription: Active subscription information (if any)
     - is_admin: Admin status (ONLY included if user is admin, for security)
+    - email_notifications_enabled: Whether user wants to receive email notifications
     
     Note: is_active, is_verified, created_at, updated_at are excluded
     as they are not used by the frontend and are handled server-side.
@@ -73,6 +76,7 @@ class UserResponse(BaseModel):
     full_name: str
     subscription: SubscriptionInfo | None = None
     is_admin: bool | None = None  # Optional - only set if user is admin
+    email_notifications_enabled: bool = True
 
 
 @router.get("/me", response_model=UserResponse, response_model_exclude_none=True)
@@ -129,6 +133,7 @@ async def get_current_user_info(
         "email": user_data["email"],
         "full_name": user_data["full_name"],
         "subscription": user_data.get("subscription"),  # Can be None
+        "email_notifications_enabled": current_user.email_notifications_enabled,
     }
     
     # Only add is_admin if it was set (user is admin)
@@ -217,8 +222,25 @@ async def update_current_user(
         )
         db.add(audit_log)
     
+    # Update email_notifications_enabled if provided
+    if user_update.email_notifications_enabled is not None:
+        old_value = current_user.email_notifications_enabled
+        current_user.email_notifications_enabled = user_update.email_notifications_enabled
+        
+        # Create audit log entry for notification preference change
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="update_notification_preference",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Email notifications {'enabled' if user_update.email_notifications_enabled else 'disabled'} (was {'enabled' if old_value else 'disabled'})"
+        )
+        db.add(audit_log)
+    
     # Validate that at least one field is being updated
-    if user_update.full_name is None:
+    if user_update.full_name is None and user_update.email_notifications_enabled is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one field must be provided for update"
@@ -227,7 +249,40 @@ async def update_current_user(
     db.commit()
     db.refresh(current_user)
     
-    return current_user.to_dict()
+    # Build response similar to get_current_user_info
+    user_data = current_user.to_dict()
+    subscription = SubscriptionService.get_active_subscription(current_user.id, db)
+    
+    if subscription:
+        subscription_data = subscription.to_dict()
+        user_data["subscription"] = {
+            "id": subscription_data.get("id"),
+            "plan": subscription_data.get("plan"),
+            "status": subscription_data.get("status"),
+            "billing_period": subscription_data.get("billing_period"),
+            "current_period_start": subscription_data.get("current_period_start"),
+            "current_period_end": subscription_data.get("current_period_end"),
+            "cancel_at_period_end": subscription_data.get("cancel_at_period_end", False),
+            "last_billing_date": subscription_data.get("last_billing_date"),
+            "next_billing_date": subscription_data.get("next_billing_date"),
+            "last_billing_status": subscription_data.get("last_billing_status"),
+            "trial_end_date": subscription_data.get("trial_end_date")
+        }
+    else:
+        user_data["subscription"] = None
+    
+    response_data = {
+        "id": user_data["id"],
+        "email": user_data["email"],
+        "full_name": user_data["full_name"],
+        "subscription": user_data.get("subscription"),
+        "email_notifications_enabled": current_user.email_notifications_enabled,
+    }
+    
+    if current_user.is_admin:
+        response_data["is_admin"] = True
+    
+    return response_data
 
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)

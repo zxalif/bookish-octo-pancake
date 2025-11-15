@@ -69,6 +69,9 @@ class User(Base, TimestampMixin):
     registration_ip = Column(String(45), nullable=True)  # IPv6 max length is 45 chars
     last_login_ip = Column(String(45), nullable=True)
     
+    # Email Notification Preferences
+    email_notifications_enabled = Column(Boolean, default=True, nullable=False)  # User can opt out of email notifications
+    
     # Relationships
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan")

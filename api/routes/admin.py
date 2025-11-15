@@ -30,6 +30,7 @@ from models.page_visit import PageVisit
 from services.admin_analytics_service import AdminAnalyticsService
 from services.support_service import SupportService
 from services.email_service import EmailService
+from services.auth_service import AuthService
 from core.logger import get_logger
 from core.sanitization import sanitize_message, sanitize_subject
 from bleach import clean
@@ -177,6 +178,9 @@ async def list_users(
     result = []
     for user in users:
         active_sub = user.get_active_subscription()
+        # Get keyword and opportunity counts
+        keyword_count = len([ks for ks in user.keyword_searches if not ks.deleted_at])
+        opportunity_count = len(user.opportunities)
         result.append({
             "id": user.id,
             "email": user.email,
@@ -187,7 +191,9 @@ async def list_users(
             "is_banned": user.is_banned,
             "created_at": user.created_at.isoformat(),
             "has_active_subscription": active_sub is not None,
-            "subscription_plan": active_sub.plan.value if active_sub else None
+            "subscription_plan": active_sub.plan.value if active_sub else None,
+            "keyword_count": keyword_count,
+            "opportunity_count": opportunity_count
         })
     
     return {
@@ -645,6 +651,140 @@ async def send_email_to_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to send email: {str(e)}"
         )
+
+
+@router.post("/users/{user_id}/send-verification-email")
+@limiter.limit("20/minute")  # Lower limit for email sending
+async def send_verification_email_to_user(
+    request: Request,
+    user_id: str,
+    admin_user: User = Depends(require_csrf_protection),
+    db: Session = Depends(get_db)
+):
+    """
+    Send verification email to a user (admin only).
+    
+    **Admin Only**: Requires admin role.
+    
+    **Response 200**: Success message
+    **Response 404**: User not found
+    **Response 403**: Not an admin
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    try:
+        # Generate verification token
+        verification_token = AuthService.generate_email_verification_token(user.id)
+        
+        # Send verification email
+        email_sent = await EmailService.send_verification_email(
+            email=user.email,
+            user_id=user.id,
+            token=verification_token
+        )
+        
+        if not email_sent:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send verification email"
+            )
+        
+        # SECURITY: Log admin action
+        logger.info(
+            f"Admin action: send_verification_email",
+            extra={
+                "admin_user_id": admin_user.id,
+                "admin_email": admin_user.email,
+                "target_user_id": user_id,
+                "target_email": user.email,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+        
+        # Create audit log entry
+        audit_log = UserAuditLog(
+            user_id=user.id,
+            action="admin_send_verification",
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent", ""),
+            details=f"Verification email sent by admin: {admin_user.email}"
+        )
+        db.add(audit_log)
+        db.commit()
+        
+        return {"message": "Verification email sent successfully"}
+        
+    except Exception as e:
+        logger.error(f"Error sending verification email: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send verification email: {str(e)}"
+        )
+
+
+@router.post("/users/{user_id}/verify-email")
+@limiter.limit("50/minute")
+async def verify_user_email(
+    request: Request,
+    user_id: str,
+    admin_user: User = Depends(require_csrf_protection),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually verify a user's email address (admin only).
+    
+    **Admin Only**: Requires admin role.
+    
+    **Response 200**: Success message
+    **Response 404**: User not found
+    **Response 403**: Not an admin
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    if user.is_verified:
+        return {"message": "User email is already verified"}
+    
+    # Mark email as verified
+    user.is_verified = True
+    db.commit()
+    db.refresh(user)
+    
+    # SECURITY: Log admin action
+    logger.info(
+        f"Admin action: verify_user_email",
+        extra={
+            "admin_user_id": admin_user.id,
+            "admin_email": admin_user.email,
+            "target_user_id": user_id,
+            "target_email": user.email,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+    
+    # Create audit log entry
+    audit_log = UserAuditLog(
+        user_id=user.id,
+        action="admin_verify_email",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", ""),
+        details=f"Email verified by admin: {admin_user.email}"
+    )
+    db.add(audit_log)
+    db.commit()
+    
+    return {"message": "User email verified successfully"}
 
 
 # ===== Subscription Management =====
