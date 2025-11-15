@@ -75,22 +75,22 @@ class LeadRefreshService:
                 if not leads:
                     continue
                 
-                # Get existing opportunity Rixly IDs to avoid duplicates
-                existing_rixly_ids = {
-                    opp.rixly_lead_id  # type: ignore
+                # Get existing opportunity source_post_ids to avoid duplicates
+                # Note: source_post_id stores the Rixly lead ID (source_id from Rixly API)
+                existing_source_ids = {
+                    opp.source_post_id
                     for opp in db.query(Opportunity).filter(
-                        Opportunity.keyword_search_id == search.id,
-                        Opportunity.rixly_lead_id.isnot(None)  # type: ignore
+                        Opportunity.keyword_search_id == search.id
                     ).all()
-                    if opp.rixly_lead_id  # type: ignore
                 }
                 
                 # Process new leads
                 new_count = 0
                 for lead in leads:
-                    rixly_lead_id = lead.get("id") or lead.get("rixly_lead_id")
+                    # Get source_post_id from lead (this is what's stored in Opportunity.source_post_id)
+                    source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
                     
-                    if not rixly_lead_id or rixly_lead_id in existing_rixly_ids:
+                    if not source_post_id or source_post_id in existing_source_ids:
                         continue
                     
                     # Convert lead to opportunity

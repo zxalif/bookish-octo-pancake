@@ -95,7 +95,24 @@ async def refresh_for_user(
         
         logger.info(f"Refreshing opportunities for user: {user.email} (ID: {user.id})")
         
-        # Get active searches
+        # Get all searches for debugging
+        all_searches = db.query(KeywordSearch).filter(
+            KeywordSearch.user_id == user.id,
+            KeywordSearch.deleted_at.is_(None)  # type: ignore
+        ).all()
+        
+        logger.info(f"Found {len(all_searches)} total active searches for user {user.email}")
+        
+        # Debug: Log search details
+        for search in all_searches:
+            logger.info(
+                f"  Search: {search.name} (ID: {search.id}) - "
+                f"scraping_mode: {search.scraping_mode}, "
+                f"zola_search_id: {search.zola_search_id}, "
+                f"deleted_at: {search.deleted_at}"
+            )
+        
+        # Get active searches with Rixly integration
         query = db.query(KeywordSearch).filter(
             KeywordSearch.user_id == user.id,
             KeywordSearch.deleted_at.is_(None),  # type: ignore
@@ -105,17 +122,35 @@ async def refresh_for_user(
         # Filter by scraping mode if not including scheduled
         if not include_scheduled:
             query = query.filter(KeywordSearch.scraping_mode == "one_time")
+            logger.info("Filtering for one_time searches only (use --include-scheduled to include scheduled searches)")
+        else:
+            logger.info("Including both one_time and scheduled searches")
         
         active_searches = query.all()
         
         if not active_searches:
+            # Provide helpful error message
+            searches_without_rixly = [s for s in all_searches if not s.zola_search_id]
+            scheduled_searches = [s for s in all_searches if s.scraping_mode == "scheduled" and s.zola_search_id]
+            
+            message = "No active searches with Rixly integration found"
+            if scheduled_searches and not include_scheduled:
+                message += f". Found {len(scheduled_searches)} scheduled search(es) - use --include-scheduled to refresh them"
+            if searches_without_rixly:
+                message += f". Found {len(searches_without_rixly)} search(es) without Rixly integration (missing zola_search_id)"
+            
             return {
                 "status": "success",
                 "user_id": user.id,
                 "user_email": user.email,
                 "searches_checked": 0,
                 "new_opportunities": 0,
-                "message": "No active searches with Rixly integration found"
+                "message": message,
+                "debug_info": {
+                    "total_searches": len(all_searches),
+                    "searches_without_rixly": len(searches_without_rixly),
+                    "scheduled_searches": len(scheduled_searches) if not include_scheduled else 0
+                }
             }
         
         logger.info(f"Found {len(active_searches)} active searches for user {user.email}")
@@ -141,23 +176,23 @@ async def refresh_for_user(
                 
                 logger.info(f"Fetched {len(leads)} leads from Rixly for search {search.name}")
                 
-                # Get existing opportunity Rixly IDs to avoid duplicates
+                # Get existing opportunity source_post_ids to avoid duplicates
+                # Note: source_post_id stores the Rixly lead ID (source_id from Rixly API)
                 from models.opportunity import Opportunity
-                existing_rixly_ids = {
-                    opp.rixly_lead_id  # type: ignore
+                existing_source_ids = {
+                    opp.source_post_id
                     for opp in db.query(Opportunity).filter(
-                        Opportunity.keyword_search_id == search.id,
-                        Opportunity.rixly_lead_id.isnot(None)  # type: ignore
+                        Opportunity.keyword_search_id == search.id
                     ).all()
-                    if opp.rixly_lead_id  # type: ignore
                 }
                 
                 # Process new leads
                 new_count = 0
                 for lead in leads:
-                    rixly_lead_id = lead.get("id") or lead.get("rixly_lead_id")
+                    # Get source_post_id from lead (this is what's stored in Opportunity.source_post_id)
+                    source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
                     
-                    if not rixly_lead_id or rixly_lead_id in existing_rixly_ids:
+                    if not source_post_id or source_post_id in existing_source_ids:
                         continue
                     
                     # Convert lead to opportunity
@@ -275,23 +310,23 @@ async def refresh_for_search(search_id: str) -> dict:
         
         logger.info(f"Fetched {len(leads)} leads from Rixly")
         
-        # Get existing opportunity Rixly IDs
+        # Get existing opportunity source_post_ids to avoid duplicates
+        # Note: source_post_id stores the Rixly lead ID (source_id from Rixly API)
         from models.opportunity import Opportunity
-        existing_rixly_ids = {
-            opp.rixly_lead_id  # type: ignore
+        existing_source_ids = {
+            opp.source_post_id
             for opp in db.query(Opportunity).filter(
-                Opportunity.keyword_search_id == search.id,
-                Opportunity.rixly_lead_id.isnot(None)  # type: ignore
+                Opportunity.keyword_search_id == search.id
             ).all()
-            if opp.rixly_lead_id  # type: ignore
         }
         
         # Process new leads
         new_count = 0
         for lead in leads:
-            rixly_lead_id = lead.get("id") or lead.get("rixly_lead_id")
+            # Get source_post_id from lead (this is what's stored in Opportunity.source_post_id)
+            source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
             
-            if not rixly_lead_id or rixly_lead_id in existing_rixly_ids:
+            if not source_post_id or source_post_id in existing_source_ids:
                 continue
             
             try:
@@ -318,7 +353,7 @@ async def refresh_for_search(search_id: str) -> dict:
             "search_name": search.name,
             "leads_fetched": len(leads),
             "new_opportunities": new_count,
-            "existing_opportunities": len(existing_rixly_ids),
+            "existing_opportunities": len(existing_source_ids),
             "message": f"Fetched {len(leads)} leads, created {new_count} new opportunities"
         }
         
@@ -409,8 +444,13 @@ def main():
         print("REFRESH RESULTS")
         print("=" * 60)
         for key, value in result.items():
-            if key != "searches_with_new_leads":  # Print this separately
+            if key not in ["searches_with_new_leads", "debug_info"]:  # Print these separately
                 print(f"{key}: {value}")
+        
+        if "debug_info" in result and result["debug_info"]:
+            print("\nDebug Information:")
+            for key, value in result["debug_info"].items():
+                print(f"  {key}: {value}")
         
         if "searches_with_new_leads" in result and result["searches_with_new_leads"]:
             print("\nSearches with new leads:")
