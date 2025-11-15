@@ -94,3 +94,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Playwright browser cache
+.cache/
+ms-playwright/
+
