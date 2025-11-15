@@ -9,7 +9,7 @@ from sqlalchemy import Column, String, Text, Index
 from datetime import datetime
 
 from core.database import Base
-from models.base import generate_uuid, TimestampMixin
+from models.base import generate_uuid, TimestampMixin, format_utc_datetime
 
 
 class PageVisit(Base, TimestampMixin):
@@ -89,6 +89,6 @@ class PageVisit(Base, TimestampMixin):
             "session_id": self.session_id,
             "country": self.country,
             "device_type": self.device_type,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": format_utc_datetime(self.created_at),  # Format with UTC indicator
         }
 

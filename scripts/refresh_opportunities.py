@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""
+Manual Opportunity Refresh Script
+
+This script manually fetches leads from Rixly API and creates opportunities.
+This is an alternative to webhooks - useful for:
+- Testing
+- Manual refresh when webhooks fail
+- One-time searches that don't use webhooks
+- Debugging
+
+Usage:
+    # Refresh for a specific user (by email)
+    python scripts/refresh_opportunities.py --user-email user@example.com
+
+    # Refresh for a specific user (by user ID)
+    python scripts/refresh_opportunities.py --user-id <uuid>
+
+    # Refresh for a specific keyword search
+    python scripts/refresh_opportunities.py --search-id <uuid>
+
+    # Refresh for all users with active searches
+    python scripts/refresh_opportunities.py --all-users
+
+    # Refresh without sending emails
+    python scripts/refresh_opportunities.py --user-email user@example.com --no-email
+
+    # Refresh scheduled searches too (normally only one_time searches are refreshed)
+    python scripts/refresh_opportunities.py --user-email user@example.com --include-scheduled
+"""
+
+import os
+import sys
+import argparse
+import asyncio
+from typing import Optional
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.database import SessionLocal
+from core.logger import get_logger, setup_logging
+from core.config import get_settings
+from models.user import User
+from models.keyword_search import KeywordSearch
+from services.lead_refresh_service import LeadRefreshService
+from services.opportunity_service import OpportunityService
+
+# Initialize logging
+setup_logging()
+logger = get_logger(__name__)
+settings = get_settings()
+
+
+async def refresh_for_user(
+    user_email: Optional[str] = None,
+    user_id: Optional[str] = None,
+    send_email: bool = True,
+    include_scheduled: bool = False
+) -> dict:
+    """
+    Refresh opportunities for a specific user.
+    
+    Args:
+        user_email: User email address
+        user_id: User UUID
+        send_email: Whether to send email notifications
+        include_scheduled: Whether to include scheduled searches (normally only one_time)
+        
+    Returns:
+        dict: Refresh results
+    """
+    db = SessionLocal()
+    try:
+        # Find user
+        if user_email:
+            user = db.query(User).filter(User.email == user_email).first()
+            if not user:
+                return {
+                    "status": "error",
+                    "message": f"User with email {user_email} not found"
+                }
+        elif user_id:
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return {
+                    "status": "error",
+                    "message": f"User with ID {user_id} not found"
+                }
+        else:
+            return {
+                "status": "error",
+                "message": "Either user_email or user_id must be provided"
+            }
+        
+        logger.info(f"Refreshing opportunities for user: {user.email} (ID: {user.id})")
+        
+        # Get active searches
+        query = db.query(KeywordSearch).filter(
+            KeywordSearch.user_id == user.id,
+            KeywordSearch.deleted_at.is_(None),  # type: ignore
+            KeywordSearch.zola_search_id.isnot(None)  # type: ignore - zola_search_id stores Rixly search ID
+        )
+        
+        # Filter by scraping mode if not including scheduled
+        if not include_scheduled:
+            query = query.filter(KeywordSearch.scraping_mode == "one_time")
+        
+        active_searches = query.all()
+        
+        if not active_searches:
+            return {
+                "status": "success",
+                "user_id": user.id,
+                "user_email": user.email,
+                "searches_checked": 0,
+                "new_opportunities": 0,
+                "message": "No active searches with Rixly integration found"
+            }
+        
+        logger.info(f"Found {len(active_searches)} active searches for user {user.email}")
+        
+        # Refresh leads for each search
+        total_new_opportunities = 0
+        searches_with_new_leads = []
+        
+        for search in active_searches:
+            try:
+                logger.info(f"Fetching leads for search: {search.name} (Rixly ID: {search.zola_search_id})")
+                
+                # Fetch leads from Rixly
+                leads = await OpportunityService.fetch_leads_from_rixly(
+                    rixly_search_id=search.zola_search_id,  # type: ignore
+                    limit=500,  # Fetch more leads
+                    offset=0
+                )
+                
+                if not leads:
+                    logger.info(f"No leads found for search {search.name}")
+                    continue
+                
+                logger.info(f"Fetched {len(leads)} leads from Rixly for search {search.name}")
+                
+                # Get existing opportunity Rixly IDs to avoid duplicates
+                from models.opportunity import Opportunity
+                existing_rixly_ids = {
+                    opp.rixly_lead_id  # type: ignore
+                    for opp in db.query(Opportunity).filter(
+                        Opportunity.keyword_search_id == search.id,
+                        Opportunity.rixly_lead_id.isnot(None)  # type: ignore
+                    ).all()
+                    if opp.rixly_lead_id  # type: ignore
+                }
+                
+                # Process new leads
+                new_count = 0
+                for lead in leads:
+                    rixly_lead_id = lead.get("id") or lead.get("rixly_lead_id")
+                    
+                    if not rixly_lead_id or rixly_lead_id in existing_rixly_ids:
+                        continue
+                    
+                    # Convert lead to opportunity
+                    try:
+                        opportunity = OpportunityService.convert_zola_lead_to_opportunity(
+                            zola_lead=lead,
+                            user_id=user.id,
+                            keyword_search_id=search.id
+                        )
+                        db.add(opportunity)
+                        new_count += 1
+                        total_new_opportunities += 1
+                    except Exception as e:
+                        logger.error(f"Error converting lead to opportunity: {str(e)}")
+                        continue
+                
+                if new_count > 0:
+                    db.commit()
+                    searches_with_new_leads.append({
+                        "search_id": search.id,
+                        "search_name": search.name,
+                        "new_count": new_count
+                    })
+                    logger.info(f"Created {new_count} new opportunities for search {search.name}")
+                else:
+                    logger.info(f"No new opportunities for search {search.name} (all leads already exist)")
+                    
+            except Exception as e:
+                logger.error(f"Error refreshing leads for search {search.id}: {str(e)}", exc_info=True)
+                db.rollback()
+                continue
+        
+        # Send email notification if requested
+        email_sent = False
+        if send_email and total_new_opportunities > 0 and user.email_notifications_enabled:
+            try:
+                # Use the service method to send email
+                await asyncio.to_thread(
+                    LeadRefreshService._send_new_leads_email_sync,
+                    user=user,
+                    new_opportunities_count=total_new_opportunities,
+                    searches_with_leads=searches_with_new_leads,
+                    db=db
+                )
+                email_sent = True
+                logger.info(f"Sent email notification to {user.email}")
+            except Exception as e:
+                logger.error(f"Error sending email notification: {str(e)}")
+        
+        return {
+            "status": "success",
+            "user_id": user.id,
+            "user_email": user.email,
+            "searches_checked": len(active_searches),
+            "new_opportunities": total_new_opportunities,
+            "searches_with_new_leads": searches_with_new_leads,
+            "email_sent": email_sent,
+            "message": f"Refreshed {len(active_searches)} searches, found {total_new_opportunities} new opportunities"
+        }
+        
+    finally:
+        db.close()
+
+
+async def refresh_for_search(search_id: str) -> dict:
+    """
+    Refresh opportunities for a specific keyword search.
+    
+    Args:
+        search_id: Keyword search UUID
+        
+    Returns:
+        dict: Refresh results
+    """
+    db = SessionLocal()
+    try:
+        search = db.query(KeywordSearch).filter(KeywordSearch.id == search_id).first()
+        if not search:
+            return {
+                "status": "error",
+                "message": f"Keyword search with ID {search_id} not found"
+            }
+        
+        if not search.zola_search_id:  # type: ignore
+            return {
+                "status": "error",
+                "message": f"Keyword search {search_id} does not have a Rixly search ID"
+            }
+        
+        user = db.query(User).filter(User.id == search.user_id).first()
+        if not user:
+            return {
+                "status": "error",
+                "message": f"User for search {search_id} not found"
+            }
+        
+        logger.info(f"Refreshing opportunities for search: {search.name} (ID: {search_id})")
+        
+        # Fetch leads from Rixly
+        leads = await OpportunityService.fetch_leads_from_rixly(
+            rixly_search_id=search.zola_search_id,  # type: ignore
+            limit=500,
+            offset=0
+        )
+        
+        if not leads:
+            return {
+                "status": "success",
+                "search_id": search_id,
+                "search_name": search.name,
+                "leads_fetched": 0,
+                "new_opportunities": 0,
+                "message": "No leads found in Rixly"
+            }
+        
+        logger.info(f"Fetched {len(leads)} leads from Rixly")
+        
+        # Get existing opportunity Rixly IDs
+        from models.opportunity import Opportunity
+        existing_rixly_ids = {
+            opp.rixly_lead_id  # type: ignore
+            for opp in db.query(Opportunity).filter(
+                Opportunity.keyword_search_id == search.id,
+                Opportunity.rixly_lead_id.isnot(None)  # type: ignore
+            ).all()
+            if opp.rixly_lead_id  # type: ignore
+        }
+        
+        # Process new leads
+        new_count = 0
+        for lead in leads:
+            rixly_lead_id = lead.get("id") or lead.get("rixly_lead_id")
+            
+            if not rixly_lead_id or rixly_lead_id in existing_rixly_ids:
+                continue
+            
+            try:
+                opportunity = OpportunityService.convert_zola_lead_to_opportunity(
+                    zola_lead=lead,
+                    user_id=user.id,
+                    keyword_search_id=search.id
+                )
+                db.add(opportunity)
+                new_count += 1
+            except Exception as e:
+                logger.error(f"Error converting lead to opportunity: {str(e)}")
+                continue
+        
+        if new_count > 0:
+            db.commit()
+            logger.info(f"Created {new_count} new opportunities")
+        else:
+            logger.info(f"No new opportunities (all {len(leads)} leads already exist)")
+        
+        return {
+            "status": "success",
+            "search_id": search_id,
+            "search_name": search.name,
+            "leads_fetched": len(leads),
+            "new_opportunities": new_count,
+            "existing_opportunities": len(existing_rixly_ids),
+            "message": f"Fetched {len(leads)} leads, created {new_count} new opportunities"
+        }
+        
+    finally:
+        db.close()
+
+
+async def refresh_for_all_users(include_scheduled: bool = False) -> dict:
+    """
+    Refresh opportunities for all users with active searches.
+    
+    Args:
+        include_scheduled: Whether to include scheduled searches
+        
+    Returns:
+        dict: Refresh results
+    """
+    logger.info("Refreshing opportunities for all users...")
+    result = await LeadRefreshService.refresh_leads_for_all_users(SessionLocal())
+    return result
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Manually refresh opportunities from Rixly API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    # User selection (mutually exclusive)
+    user_group = parser.add_mutually_exclusive_group()
+    user_group.add_argument(
+        "--user-email",
+        type=str,
+        help="User email address to refresh opportunities for"
+    )
+    user_group.add_argument(
+        "--user-id",
+        type=str,
+        help="User UUID to refresh opportunities for"
+    )
+    user_group.add_argument(
+        "--search-id",
+        type=str,
+        help="Keyword search UUID to refresh opportunities for"
+    )
+    user_group.add_argument(
+        "--all-users",
+        action="store_true",
+        help="Refresh opportunities for all users with active searches"
+    )
+    
+    # Options
+    parser.add_argument(
+        "--no-email",
+        action="store_true",
+        help="Don't send email notifications"
+    )
+    parser.add_argument(
+        "--include-scheduled",
+        action="store_true",
+        help="Include scheduled searches (normally only one_time searches are refreshed)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if not any([args.user_email, args.user_id, args.search_id, args.all_users]):
+        parser.error("One of --user-email, --user-id, --search-id, or --all-users must be provided")
+    
+    # Run the appropriate refresh function
+    try:
+        if args.search_id:
+            result = asyncio.run(refresh_for_search(args.search_id))
+        elif args.all_users:
+            result = asyncio.run(refresh_for_all_users(include_scheduled=args.include_scheduled))
+        else:
+            result = asyncio.run(refresh_for_user(
+                user_email=args.user_email,
+                user_id=args.user_id,
+                send_email=not args.no_email,
+                include_scheduled=args.include_scheduled
+            ))
+        
+        # Print results
+        print("\n" + "=" * 60)
+        print("REFRESH RESULTS")
+        print("=" * 60)
+        for key, value in result.items():
+            if key != "searches_with_new_leads":  # Print this separately
+                print(f"{key}: {value}")
+        
+        if "searches_with_new_leads" in result and result["searches_with_new_leads"]:
+            print("\nSearches with new leads:")
+            for search in result["searches_with_new_leads"]:
+                print(f"  - {search['search_name']}: {search['new_count']} new opportunities")
+        
+        print("=" * 60)
+        
+        if result.get("status") == "error":
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error: {str(e)}", exc_info=True)
+        print(f"\nError: {str(e)}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+

@@ -8,7 +8,7 @@ from sqlalchemy import Column, String, ForeignKey, Integer, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 import enum
 
-from models.base import generate_uuid, TimestampMixin
+from models.base import generate_uuid, TimestampMixin, format_utc_datetime
 from core.database import Base
 
 
@@ -44,9 +44,9 @@ class SupportThread(Base, TimestampMixin):
             "user_id": self.user_id,
             "subject": self.subject,
             "status": self.status.value,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "last_message_at": self.messages[-1].created_at.isoformat() if self.messages else None,
+            "created_at": format_utc_datetime(self.created_at),  # Format with UTC indicator
+            "updated_at": format_utc_datetime(self.updated_at),  # Format with UTC indicator
+            "last_message_at": format_utc_datetime(self.messages[-1].created_at) if self.messages else None,  # Format with UTC indicator
             "unread_count": sum(1 for msg in self.messages if msg.sender == MessageSender.SUPPORT and not msg.read),
         }
 

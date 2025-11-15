@@ -266,6 +266,110 @@ class OpportunityService:
             return False
     
     @staticmethod
+    async def disable_keyword_search_in_rixly(rixly_search_id: str) -> bool:
+        """
+        Disable a keyword search in Rixly API.
+        
+        This stops scheduled scraping for the search without deleting it.
+        Useful when a search is soft-deleted in SaaS but we want to keep it in Rixly
+        for historical data access.
+        
+        Args:
+            rixly_search_id: Rixly keyword search ID
+            
+        Returns:
+            bool: True if disabled successfully, False otherwise
+        """
+        api_url = OpportunityService.get_rixly_api_url()
+        headers = OpportunityService.get_rixly_headers()
+        
+        try:
+            # First, get the current search to preserve its configuration
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                get_response = await client.get(
+                    f"{api_url}/api/v1/keyword-searches/{rixly_search_id}",
+                    headers=headers
+                )
+                
+                if get_response.status_code != 200:
+                    logger.warning(f"Rixly search {rixly_search_id} not found, cannot disable")
+                    return False
+                
+                search_data = get_response.json()
+                
+                # Update search with enabled=False
+                payload = {
+                    **search_data,  # Preserve all existing fields
+                    "enabled": False  # Disable the search
+                }
+                
+                # Remove fields that shouldn't be in update payload
+                payload.pop("id", None)
+                payload.pop("created_at", None)
+                payload.pop("updated_at", None)
+                
+                update_response = await client.put(
+                    f"{api_url}/api/v1/keyword-searches/{rixly_search_id}",
+                    headers=headers,
+                    json=payload
+                )
+                
+                if update_response.status_code == 200:
+                    logger.info(f"Disabled keyword search in Rixly: {rixly_search_id}")
+                    return True
+                else:
+                    logger.warning(f"Failed to disable Rixly search {rixly_search_id}: {update_response.status_code}")
+                    return False
+                    
+        except httpx.RequestError as e:
+            logger.warning(f"Failed to connect to Rixly to disable search {rixly_search_id}: {str(e)}")
+            return False
+        except Exception as e:
+            logger.warning(f"Error disabling Rixly search {rixly_search_id}: {str(e)}")
+            return False
+    
+    @staticmethod
+    async def delete_keyword_search_in_rixly(rixly_search_id: str) -> bool:
+        """
+        Delete a keyword search from Rixly API.
+        
+        This permanently removes the search from Rixly.
+        Use with caution - this will also remove access to historical leads.
+        
+        Args:
+            rixly_search_id: Rixly keyword search ID
+            
+        Returns:
+            bool: True if deleted successfully, False otherwise
+        """
+        api_url = OpportunityService.get_rixly_api_url()
+        headers = OpportunityService.get_rixly_headers()
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(
+                    f"{api_url}/api/v1/keyword-searches/{rixly_search_id}",
+                    headers=headers
+                )
+                
+                if response.status_code == 204:
+                    logger.info(f"Deleted keyword search from Rixly: {rixly_search_id}")
+                    return True
+                elif response.status_code == 404:
+                    logger.info(f"Rixly search {rixly_search_id} already deleted or not found")
+                    return True  # Consider it successful if already deleted
+                else:
+                    logger.warning(f"Failed to delete Rixly search {rixly_search_id}: {response.status_code}")
+                    return False
+                    
+        except httpx.RequestError as e:
+            logger.warning(f"Failed to connect to Rixly to delete search {rixly_search_id}: {str(e)}")
+            return False
+        except Exception as e:
+            logger.warning(f"Error deleting Rixly search {rixly_search_id}: {str(e)}")
+            return False
+    
+    @staticmethod
     async def check_rixly_scrape_status(rixly_search_id: str) -> Dict[str, Any]:
         """
         Check scraping status for a keyword search in Rixly.

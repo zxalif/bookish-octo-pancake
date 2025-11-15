@@ -10,7 +10,7 @@ from datetime import datetime
 import enum
 
 from core.database import Base
-from models.base import generate_uuid, TimestampMixin
+from models.base import generate_uuid, TimestampMixin, format_utc_datetime
 from models.price import BillingPeriod
 
 
@@ -127,13 +127,13 @@ class Subscription(Base, TimestampMixin):
             "billing_period": self.billing_period.value if self.billing_period else None,
             "status": self.status.value,
             "paddle_subscription_id": self.paddle_subscription_id,
-            "current_period_start": self.current_period_start.isoformat() if self.current_period_start else None,
-            "current_period_end": self.current_period_end.isoformat() if self.current_period_end else None,
+            "current_period_start": format_utc_datetime(self.current_period_start),  # Format with UTC indicator
+            "current_period_end": format_utc_datetime(self.current_period_end),  # Format with UTC indicator
             "cancel_at_period_end": self.cancel_at_period_end,  # Already boolean
-            "last_billing_date": self.last_billing_date.isoformat() if self.last_billing_date else None,
-            "next_billing_date": self.next_billing_date.isoformat() if self.next_billing_date else None,
+            "last_billing_date": format_utc_datetime(self.last_billing_date),  # Format with UTC indicator
+            "next_billing_date": format_utc_datetime(self.next_billing_date),  # Format with UTC indicator
             "last_billing_status": self.last_billing_status,
-            "trial_end_date": self.trial_end_date.isoformat() if self.trial_end_date else None,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "trial_end_date": format_utc_datetime(self.trial_end_date),  # Format with UTC indicator
+            "created_at": format_utc_datetime(self.created_at),  # Format with UTC indicator
+            "updated_at": format_utc_datetime(self.updated_at),  # Format with UTC indicator
         }

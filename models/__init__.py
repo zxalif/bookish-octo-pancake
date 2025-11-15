@@ -15,6 +15,7 @@ from models.price import Price, BillingPeriod
 from models.support_thread import SupportThread, ThreadStatus
 from models.support_message import SupportMessage, MessageSender
 from models.page_visit import PageVisit
+from models.e2e_test_result import E2ETestResult
 from models.base import generate_uuid, TimestampMixin, SoftDeleteMixin
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "SupportMessage",
     "MessageSender",
     "PageVisit",
+    "E2ETestResult",
     "generate_uuid",
     "TimestampMixin",
     "SoftDeleteMixin",

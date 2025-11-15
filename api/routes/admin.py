@@ -9,16 +9,21 @@ Handles admin-only operations:
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
-from typing import Optional, List
+from sqlalchemy import or_, and_, text
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from pydantic import BaseModel, EmailStr, Field
+import httpx
+import asyncio
+import smtplib
+import time
 
-from core.database import get_db
+from core.database import get_db, engine
 from api.dependencies import get_admin_user, require_csrf_protection
 from api.middleware.rate_limit import limiter
 from models.user import User
 from models.subscription import Subscription, SubscriptionStatus, SubscriptionPlan
+from models.base import format_utc_datetime
 from models.payment import Payment
 from models.usage_metric import UsageMetric
 from models.keyword_search import KeywordSearch
@@ -33,7 +38,11 @@ from services.email_service import EmailService
 from services.auth_service import AuthService
 from core.logger import get_logger
 from core.sanitization import sanitize_message, sanitize_subject
+from core.redis_client import is_redis_available, get_redis_client
+from core.config import get_settings
 from bleach import clean
+
+settings = get_settings()
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -189,7 +198,7 @@ async def list_users(
             "is_verified": user.is_verified,
             "is_admin": user.is_admin,
             "is_banned": user.is_banned,
-            "created_at": user.created_at.isoformat(),
+            "created_at": format_utc_datetime(user.created_at),
             "has_active_subscription": active_sub is not None,
             "subscription_plan": active_sub.plan.value if active_sub else None,
             "keyword_count": keyword_count,
@@ -243,9 +252,9 @@ async def get_user_detail(
             "plan": sub.plan.value,
             "status": sub.status.value,
             "billing_period": sub.billing_period.value,
-            "created_at": sub.created_at.isoformat(),
-            "current_period_start": sub.current_period_start.isoformat() if sub.current_period_start else None,
-            "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+            "created_at": format_utc_datetime(sub.created_at),
+            "current_period_start": format_utc_datetime(sub.current_period_start),
+            "current_period_end": format_utc_datetime(sub.current_period_end),
         })
     
     return {
@@ -256,8 +265,8 @@ async def get_user_detail(
         "is_verified": user.is_verified,
         "is_admin": user.is_admin,
         "is_banned": user.is_banned,
-        "created_at": user.created_at.isoformat(),
-        "updated_at": user.updated_at.isoformat(),
+        "created_at": format_utc_datetime(user.created_at),
+        "updated_at": format_utc_datetime(user.updated_at),
         "subscription_count": subscription_count,
         "payment_count": payment_count,
         "keyword_search_count": keyword_search_count,
@@ -853,9 +862,9 @@ async def list_subscriptions(
             "plan": sub.plan.value,
             "status": sub.status.value,
             "billing_period": sub.billing_period.value,
-            "created_at": sub.created_at.isoformat(),
-            "current_period_start": sub.current_period_start.isoformat() if sub.current_period_start else None,
-            "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+            "created_at": format_utc_datetime(sub.created_at),
+            "current_period_start": format_utc_datetime(sub.current_period_start),
+            "current_period_end": format_utc_datetime(sub.current_period_end),
         })
     
     return {
@@ -988,8 +997,8 @@ async def list_support_threads(
             "user_name": thread.user.full_name,
             "subject": thread.subject,
             "status": thread.status.value,
-            "created_at": thread.created_at.isoformat(),
-            "updated_at": thread.updated_at.isoformat(),
+            "created_at": format_utc_datetime(thread.created_at),
+            "updated_at": format_utc_datetime(thread.updated_at),
             "message_count": len(thread.messages),
             "unread_count": sum(1 for msg in thread.messages if msg.sender == MessageSender.USER and not msg.read),
         })
@@ -1033,15 +1042,15 @@ async def get_support_thread(
         "user_name": thread.user.full_name,
         "subject": thread.subject,
         "status": thread.status.value,
-        "created_at": thread.created_at.isoformat(),
-        "updated_at": thread.updated_at.isoformat(),
+        "created_at": format_utc_datetime(thread.created_at),
+        "updated_at": format_utc_datetime(thread.updated_at),
         "messages": [
             {
                 "id": msg.id,
                 "content": msg.content,
                 "sender": msg.sender.value,
                 "read": msg.read,
-                "created_at": msg.created_at.isoformat(),
+                "created_at": format_utc_datetime(msg.created_at),
             }
             for msg in sorted(thread.messages, key=lambda x: x.created_at)
         ]
@@ -1551,3 +1560,420 @@ async def get_page_visit_stats(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get page visit statistics"
         )
+
+
+# ===== Service Status and Health Checks =====
+
+class ServiceStatusResponse(BaseModel):
+    """Service status response model."""
+    service: str
+    status: str  # "healthy", "degraded", "down", "unknown"
+    message: str
+    response_time_ms: Optional[float] = None
+    details: Optional[Dict[str, Any]] = None
+    last_checked: str
+
+
+class SystemStatusResponse(BaseModel):
+    """System status response model."""
+    overall_status: str  # "healthy", "degraded", "down"
+    services: List[ServiceStatusResponse]
+    checked_at: str
+
+
+@router.get("/status", response_model=SystemStatusResponse)
+@limiter.limit("30/minute")
+async def get_system_status(
+    request: Request,
+    admin_user: User = Depends(get_admin_user)
+):
+    """
+    Get comprehensive system status for all services.
+    
+    Checks health of:
+    - PostgreSQL Database
+    - Redis Cache
+    - SMTP Email Service
+    - Paddle Payment Gateway
+    - Rixly API
+    - Sentry Monitoring
+    
+    **Admin Only**: Requires admin role.
+    
+    **Response 200**: System status with all service health checks
+    **Response 403**: Not an admin
+    """
+    services_status = []
+    overall_status = "healthy"
+    
+    # Helper function to check service
+    async def check_service(name: str, check_func, *args, **kwargs):
+        start_time = time.time()
+        try:
+            if asyncio.iscoroutinefunction(check_func):
+                result = await check_func(*args, **kwargs)
+            else:
+                result = check_func(*args, **kwargs)
+            response_time = (time.time() - start_time) * 1000  # Convert to ms
+            
+            if result.get("status") == "healthy":
+                return {
+                    "service": name,
+                    "status": "healthy",
+                    "message": result.get("message", "Service is operational"),
+                    "response_time_ms": round(response_time, 2),
+                    "details": result.get("details"),
+                    "last_checked": datetime.utcnow().isoformat()
+                }
+            else:
+                return {
+                    "service": name,
+                    "status": result.get("status", "degraded"),
+                    "message": result.get("message", "Service check failed"),
+                    "response_time_ms": round(response_time, 2),
+                    "details": result.get("details"),
+                    "last_checked": datetime.utcnow().isoformat()
+                }
+        except Exception as e:
+            response_time = (time.time() - start_time) * 1000
+            logger.error(f"Error checking {name}: {str(e)}", exc_info=True)
+            return {
+                "service": name,
+                "status": "down",
+                "message": f"Service check failed: {str(e)}",
+                "response_time_ms": round(response_time, 2),
+                "details": {"error": str(e)},
+                "last_checked": datetime.utcnow().isoformat()
+            }
+    
+    # Check PostgreSQL Database
+    def check_database():
+        try:
+            start = time.time()
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()
+                response_time = (time.time() - start) * 1000
+                
+                # Get database info
+                db_info = conn.execute(text("SELECT version()")).fetchone()
+                version = db_info[0] if db_info else "Unknown"
+                
+                # Get connection pool info
+                pool = engine.pool
+                pool_size = pool.size() if hasattr(pool, 'size') else None
+                checked_out = pool.checkedout() if hasattr(pool, 'checkedout') else None
+                
+                return {
+                    "status": "healthy",
+                    "message": "Database connection successful",
+                    "details": {
+                        "version": version.split(',')[0] if version else "Unknown",
+                        "response_time_ms": round(response_time, 2),
+                        "pool_size": pool_size,
+                        "checked_out": checked_out
+                    }
+                }
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"Database connection failed: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    # Check Redis
+    def check_redis():
+        try:
+            start = time.time()
+            if is_redis_available():
+                client = get_redis_client()
+                if client:
+                    # Get Redis info
+                    info = client.info()
+                    response_time = (time.time() - start) * 1000
+                    
+                    return {
+                        "status": "healthy",
+                        "message": "Redis connection successful",
+                        "details": {
+                            "version": info.get("redis_version", "Unknown"),
+                            "used_memory_human": info.get("used_memory_human", "Unknown"),
+                            "connected_clients": info.get("connected_clients", 0),
+                            "response_time_ms": round(response_time, 2)
+                        }
+                    }
+            return {
+                "status": "down",
+                "message": "Redis is not available",
+                "details": {"note": "Application will use in-memory fallback"}
+            }
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"Redis check failed: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    # Check SMTP
+    def check_smtp():
+        try:
+            if not settings.SMTP_HOST or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+                return {
+                    "status": "unknown",
+                    "message": "SMTP not configured",
+                    "details": {"note": "SMTP credentials not set"}
+                }
+            
+            start = time.time()
+            host = settings.SMTP_HOST
+            port = settings.SMTP_PORT
+            
+            # Try to connect (don't authenticate to avoid rate limits)
+            if port == 465:
+                server = smtplib.SMTP_SSL(host, port, timeout=5)
+            else:
+                server = smtplib.SMTP(host, port, timeout=5)
+                server.starttls()
+            
+            # Just check connection, don't login (to avoid rate limits)
+            server.quit()
+            response_time = (time.time() - start) * 1000
+            
+            return {
+                "status": "healthy",
+                "message": "SMTP server connection successful",
+                "details": {
+                    "host": host,
+                    "port": port,
+                    "response_time_ms": round(response_time, 2)
+                }
+            }
+        except smtplib.SMTPConnectError as e:
+            return {
+                "status": "down",
+                "message": f"SMTP connection failed: {str(e)}",
+                "details": {"error": str(e), "host": settings.SMTP_HOST, "port": settings.SMTP_PORT}
+            }
+        except Exception as e:
+            return {
+                "status": "degraded",
+                "message": f"SMTP check failed: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    # Check Paddle
+    async def check_paddle():
+        try:
+            if not settings.PADDLE_ENABLED:
+                return {
+                    "status": "unknown",
+                    "message": "Paddle is disabled",
+                    "details": {"note": "Paddle payment gateway is not enabled"}
+                }
+            
+            if not settings.PADDLE_API_KEY or not settings.PADDLE_VENDOR_ID:
+                return {
+                    "status": "unknown",
+                    "message": "Paddle not configured",
+                    "details": {"note": "Paddle API credentials not set"}
+                }
+            
+            start = time.time()
+            # Try to make a simple API call to Paddle
+            # Use Paddle's products endpoint as a health check
+            api_url = "https://sandbox-api.paddle.com" if settings.PADDLE_ENVIRONMENT == "sandbox" else "https://api.paddle.com"
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{api_url}/products",
+                    headers={
+                        "Authorization": f"Bearer {settings.PADDLE_API_KEY}",
+                        "Content-Type": "application/json"
+                    }
+                )
+                response_time = (time.time() - start) * 1000
+                
+                if response.status_code == 200:
+                    return {
+                        "status": "healthy",
+                        "message": "Paddle API connection successful",
+                        "details": {
+                            "environment": settings.PADDLE_ENVIRONMENT,
+                            "response_time_ms": round(response_time, 2)
+                        }
+                    }
+                elif response.status_code == 401:
+                    return {
+                        "status": "down",
+                        "message": "Paddle API authentication failed",
+                        "details": {"error": "Invalid API credentials"}
+                    }
+                else:
+                    return {
+                        "status": "degraded",
+                        "message": f"Paddle API returned status {response.status_code}",
+                        "details": {"status_code": response.status_code}
+                    }
+        except httpx.TimeoutException:
+            return {
+                "status": "down",
+                "message": "Paddle API timeout",
+                "details": {"error": "Request timed out"}
+            }
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"Paddle check failed: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    # Check Rixly API
+    async def check_rixly():
+        try:
+            if not settings.RIXLY_API_URL or not settings.RIXLY_API_KEY:
+                return {
+                    "status": "unknown",
+                    "message": "Rixly not configured",
+                    "details": {"note": "Rixly API credentials not set"}
+                }
+            
+            start = time.time()
+            api_url = settings.RIXLY_API_URL.rstrip('/')
+            
+            # Try to call Rixly health endpoint or a simple endpoint
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Try health endpoint first, fallback to API root
+                try:
+                    response = await client.get(
+                        f"{api_url}/health",
+                        headers={"X-API-Key": settings.RIXLY_API_KEY},
+                        timeout=5.0
+                    )
+                except:
+                    # Fallback to API info endpoint
+                    response = await client.get(
+                        f"{api_url}/api/v1/info",
+                        headers={"X-API-Key": settings.RIXLY_API_KEY},
+                        timeout=5.0
+                    )
+                
+                response_time = (time.time() - start) * 1000
+                
+                if response.status_code == 200:
+                    return {
+                        "status": "healthy",
+                        "message": "Rixly API connection successful",
+                        "details": {
+                            "url": api_url,
+                            "response_time_ms": round(response_time, 2)
+                        }
+                    }
+                elif response.status_code == 401:
+                    return {
+                        "status": "down",
+                        "message": "Rixly API authentication failed",
+                        "details": {"error": "Invalid API key"}
+                    }
+                else:
+                    return {
+                        "status": "degraded",
+                        "message": f"Rixly API returned status {response.status_code}",
+                        "details": {"status_code": response.status_code, "url": api_url}
+                    }
+        except httpx.TimeoutException:
+            return {
+                "status": "down",
+                "message": "Rixly API timeout",
+                "details": {"error": "Request timed out", "url": settings.RIXLY_API_URL}
+            }
+        except httpx.ConnectError:
+            return {
+                "status": "down",
+                "message": "Rixly API connection failed",
+                "details": {"error": "Cannot connect to Rixly API", "url": settings.RIXLY_API_URL}
+            }
+        except Exception as e:
+            return {
+                "status": "down",
+                "message": f"Rixly check failed: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    # Check Sentry
+    def check_sentry():
+        try:
+            if not settings.SENTRY_ENABLED:
+                return {
+                    "status": "unknown",
+                    "message": "Sentry is disabled",
+                    "details": {"note": "Error monitoring is not enabled"}
+                }
+            
+            if not settings.SENTRY_DSN:
+                return {
+                    "status": "unknown",
+                    "message": "Sentry not configured",
+                    "details": {"note": "Sentry DSN not set"}
+                }
+            
+            # Sentry doesn't have a health check endpoint, so we just verify config
+            return {
+                "status": "healthy",
+                "message": "Sentry is configured",
+                "details": {
+                    "enabled": settings.SENTRY_ENABLED,
+                    "dsn_configured": bool(settings.SENTRY_DSN)
+                }
+            }
+        except Exception as e:
+            return {
+                "status": "unknown",
+                "message": f"Sentry check failed: {str(e)}",
+                "details": {"error": str(e)}
+            }
+    
+    # Run all checks
+    db_status = await check_service("PostgreSQL Database", check_database)
+    services_status.append(ServiceStatusResponse(**db_status))
+    if db_status["status"] != "healthy":
+        overall_status = "degraded" if overall_status == "healthy" else "down"
+    
+    redis_status = await check_service("Redis Cache", check_redis)
+    services_status.append(ServiceStatusResponse(**redis_status))
+    if redis_status["status"] == "down":
+        overall_status = "degraded" if overall_status == "healthy" else "down"
+    
+    smtp_status = await check_service("SMTP Email Service", check_smtp)
+    services_status.append(ServiceStatusResponse(**smtp_status))
+    if smtp_status["status"] == "down":
+        overall_status = "degraded"
+    
+    paddle_status = await check_service("Paddle Payment Gateway", check_paddle)
+    services_status.append(ServiceStatusResponse(**paddle_status))
+    if paddle_status["status"] == "down":
+        overall_status = "degraded"
+    
+    rixly_status = await check_service("Rixly API", check_rixly)
+    services_status.append(ServiceStatusResponse(**rixly_status))
+    if rixly_status["status"] == "down":
+        overall_status = "degraded"
+    
+    sentry_status = await check_service("Sentry Monitoring", check_sentry)
+    services_status.append(ServiceStatusResponse(**sentry_status))
+    
+    # SECURITY: Log admin action
+    logger.info(
+        f"Admin action: get_system_status",
+        extra={
+            "admin_user_id": admin_user.id,
+            "admin_email": admin_user.email,
+            "overall_status": overall_status,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+    
+    return SystemStatusResponse(
+        overall_status=overall_status,
+        services=services_status,
+        checked_at=datetime.utcnow().isoformat()
+    )

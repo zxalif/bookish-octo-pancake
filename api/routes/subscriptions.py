@@ -134,6 +134,7 @@ async def get_subscription_history(
 
 @router.post("/create", response_model=SubscriptionResponse, status_code=status.HTTP_201_CREATED)
 async def create_subscription(
+    request: Request,
     subscription_data: SubscriptionCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -171,6 +172,23 @@ async def create_subscription(
                 billing_period=subscription_data.billing_period,
                 db=db
             )
+        
+        # Create audit log entry for subscription creation
+        try:
+            ip_address = get_remote_address(request)
+            user_agent = request.headers.get("user-agent", "")
+            
+            audit_log = UserAuditLog(
+                user_id=current_user.id,
+                action="create_subscription",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Created subscription: plan={subscription_data.plan}, billing_period={subscription_data.billing_period}, subscription_id={subscription.id}"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for subscription creation: {str(e)}")
         
         # Use Pydantic model to ensure only expected fields are returned
         return SubscriptionResponse(

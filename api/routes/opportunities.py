@@ -14,6 +14,7 @@ from datetime import datetime
 import csv
 from io import StringIO
 import asyncio
+from slowapi.util import get_remote_address
 
 from core.database import get_db
 from core.logger import get_logger
@@ -24,6 +25,7 @@ from models.user import User
 from models.subscription import Subscription
 from models.opportunity import Opportunity, OpportunityStatus
 from models.keyword_search import KeywordSearch
+from models.user_audit_log import UserAuditLog
 from services.opportunity_service import OpportunityService
 from services.job_service import JobService, JobStatus
 from services.subscription_service import SubscriptionService
@@ -247,6 +249,7 @@ async def get_opportunity(
 
 @router.patch("/{opportunity_id}", response_model=OpportunityResponse)
 async def update_opportunity(
+    request: Request,
     opportunity_id: str,
     opportunity_data: OpportunityUpdate,
     current_user: User = Depends(get_current_user),
@@ -294,10 +297,47 @@ async def update_opportunity(
                 detail=f"Invalid status: {opportunity_data.status}"
             )
     
+    # Store old values for audit log
+    old_status = opportunity.status.value if opportunity.status else None
+    had_notes = bool(opportunity.notes)
+    opp_title = opportunity.title or "N/A"
+    
     # Update notes if provided
     # SECURITY: Sanitize user input to prevent XSS attacks
     if opportunity_data.notes is not None:
         opportunity.notes = sanitize_notes(opportunity_data.notes) if opportunity_data.notes.strip() else None
+    
+    # Create audit log entry for opportunity update
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        changes = []
+        if opportunity_data.status is not None:
+            new_status = opportunity.status.value if opportunity.status else None
+            changes.append(f"status: {old_status} -> {new_status}")
+        if opportunity_data.notes is not None:
+            if opportunity.notes:
+                if had_notes:
+                    changes.append("notes: updated")
+                else:
+                    changes.append("notes: added")
+            else:
+                changes.append("notes: cleared")
+        
+        if changes:
+            title_display = opp_title[:50] + "..." if len(opp_title) > 50 else opp_title
+            action_name = "update_opportunity" if len(changes) > 1 or (opportunity_data.status and opportunity_data.notes) else ("update_opportunity_status" if opportunity_data.status else "update_opportunity_notes")
+            audit_log = UserAuditLog(
+                user_id=current_user.id,
+                action=action_name,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Updated opportunity: {opportunity_id}, title: '{title_display}', changes: {', '.join(changes)}"
+            )
+            db.add(audit_log)
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for opportunity update: {str(e)}")
     
     db.commit()
     db.refresh(opportunity)
@@ -330,6 +370,7 @@ async def update_opportunity(
 
 @router.delete("/{opportunity_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_opportunity(
+    request: Request,
     opportunity_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -358,10 +399,93 @@ async def delete_opportunity(
             detail="Opportunity not found"
         )
     
+    # Store opportunity details for audit log before deletion
+    opp_title = opportunity.title or "N/A"
+    opp_source = opportunity.source or "N/A"
+    opp_id = opportunity.id
+    
+    # Create audit log entry for opportunity deletion
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        title_display = opp_title[:50] + "..." if len(opp_title) > 50 else opp_title
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="delete_opportunity",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Deleted opportunity: {opp_id}, title: '{title_display}', source: {opp_source}"
+        )
+        db.add(audit_log)
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for opportunity deletion: {str(e)}")
+    
     db.delete(opportunity)
     db.commit()
     
     return None
+
+
+async def send_leads_email_background(
+    user_id: str,
+    user_email: str,
+    user_name: str,
+    keyword_search_id: str,
+    keyword_search_name: str,
+    leads_count: int,
+    opportunities_url: str
+):
+    """
+    Background task to send leads notification email and create audit log.
+    
+    This runs after the webhook response is sent, so it doesn't block the API call.
+    Creates its own database session since background tasks run after response is sent.
+    """
+    from core.database import SessionLocal
+    from services.email_service import EmailService
+    
+    # Create new database session for background task
+    db = SessionLocal()
+    try:
+        # Send email notification
+        try:
+            email_sent = await EmailService.send_leads_notification_email(
+                user_email=user_email,
+                user_name=user_name,
+                keyword_search_name=keyword_search_name,
+                leads_count=leads_count,
+                opportunities_url=opportunities_url
+            )
+            if email_sent:
+                logger.info(
+                    f"Sent leads notification email to {user_email} for search {keyword_search_name} "
+                    f"({leads_count} leads)"
+                )
+                
+                # Create audit log entry for email notification
+                try:
+                    audit_log = UserAuditLog(
+                        user_id=user_id,
+                        action="leads_notification_email_sent",
+                        ip_address=None,  # Webhook doesn't have IP
+                        user_agent="Rixly Webhook",
+                        details=f"Lead notification email sent via webhook: search_id={keyword_search_id}, search_name={keyword_search_name}, leads_count={leads_count}, scraping_mode=scheduled"
+                    )
+                    db.add(audit_log)
+                    db.commit()
+                except Exception as e:
+                    # Don't fail email sending if audit log fails
+                    logger.warning(f"Failed to create audit log for leads notification email: {str(e)}")
+            else:
+                logger.warning(f"Failed to send leads notification email to {user_email}")
+        except Exception as e:
+            logger.error(
+                f"Failed to send leads notification email to {user_email}: {str(e)}",
+                exc_info=True
+            )
+    finally:
+        db.close()
 
 
 async def process_opportunity_generation(
@@ -689,6 +813,7 @@ async def get_generation_status(
 
 @router.get("/export/csv")
 async def export_opportunities_csv(
+    request: Request,
     keyword_search_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
@@ -728,6 +853,29 @@ async def export_opportunities_csv(
             )
     
     opportunities = query.order_by(Opportunity.created_at.desc()).all()
+    
+    # Create audit log entry for data export (CRITICAL for GDPR compliance)
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        filters = []
+        if keyword_search_id:
+            filters.append(f"keyword_search_id: {keyword_search_id}")
+        if status:
+            filters.append(f"status: {status}")
+        
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="export_opportunities",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Exported {len(opportunities)} opportunities as CSV, filters: {', '.join(filters) if filters else 'none'}"
+        )
+        db.add(audit_log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for opportunity export: {str(e)}")
     
     # Create CSV content
     output = StringIO()
@@ -772,6 +920,7 @@ async def export_opportunities_csv(
 
 @router.get("/export/json")
 async def export_opportunities_json(
+    request: Request,
     keyword_search_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
@@ -805,6 +954,29 @@ async def export_opportunities_json(
             )
     
     opportunities = query.order_by(Opportunity.created_at.desc()).all()
+    
+    # Create audit log entry for data export (CRITICAL for GDPR compliance)
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        filters = []
+        if keyword_search_id:
+            filters.append(f"keyword_search_id: {keyword_search_id}")
+        if status:
+            filters.append(f"status: {status}")
+        
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="export_opportunities",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Exported {len(opportunities)} opportunities as JSON, filters: {', '.join(filters) if filters else 'none'}"
+        )
+        db.add(audit_log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for opportunity export: {str(e)}")
     
     # Convert to response models (exclude user_id)
     opportunity_responses = [
@@ -853,6 +1025,7 @@ class RixlyWebhookPayload(BaseModel):
 @router.post("/webhook/rixly", status_code=status.HTTP_200_OK)
 async def rixly_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     x_rixly_signature: Optional[str] = Header(None, alias="X-Rixly-Signature")
 ):
@@ -961,29 +1134,32 @@ async def rixly_webhook(
                     
                     if leads_created > 0 and user:
                         # Only send email for scheduled searches
+                        # Also check if user has email notifications enabled
                         scraping_mode = getattr(keyword_search, 'scraping_mode', 'one_time')
-                        if scraping_mode == "scheduled":
+                        if scraping_mode == "scheduled" and user.email_notifications_enabled:
                             # Build opportunities URL
                             opportunities_url = f"{settings.FRONTEND_URL}/dashboard/opportunities?search={keyword_search_id}"
                             
-                            # Send email notification
-                            try:
-                                await EmailService.send_leads_notification_email(
-                                    user_email=user.email,
-                                    user_name=user.full_name,
-                                    keyword_search_name=keyword_search_name,
-                                    leads_count=leads_created,
-                                    opportunities_url=opportunities_url
-                                )
-                                logger.info(
-                                    f"Sent leads notification email to {user.email} for search {keyword_search_name} "
-                                    f"({leads_created} leads)"
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to send leads notification email to {user.email}: {str(e)}",
-                                    exc_info=True
-                                )
+                            # Send email notification in background (non-blocking)
+                            # This allows webhook to respond immediately without waiting for email to send
+                            background_tasks.add_task(
+                                send_leads_email_background,
+                                user_id=user.id,
+                                user_email=user.email,
+                                user_name=user.full_name,
+                                keyword_search_id=keyword_search_id,
+                                keyword_search_name=keyword_search_name,
+                                leads_count=leads_created,
+                                opportunities_url=opportunities_url
+                            )
+                            logger.info(
+                                f"Queued leads notification email for {user.email} for search {keyword_search_name} "
+                                f"({leads_created} leads) - sending in background"
+                            )
+                        elif scraping_mode == "scheduled" and not user.email_notifications_enabled:
+                            logger.debug(
+                                f"Skipping email notification for user {user.email} - notifications disabled"
+                            )
                 
                 elif event_type == "lead.created":
                     # Handle individual lead creation (optional - we mainly use job.completed)

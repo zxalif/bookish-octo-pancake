@@ -67,9 +67,10 @@ class UserResponse(BaseModel):
     - is_admin: Admin status (ONLY included if user is admin, for security)
     - email_notifications_enabled: Whether user wants to receive email notifications
     
-    Note: is_active, is_verified, created_at, updated_at are excluded
+    Note: is_active, created_at, updated_at are excluded
     as they are not used by the frontend and are handled server-side.
     SECURITY: is_admin is only included if the user is actually an admin.
+    SECURITY: is_verified is safe to include for authenticated users (they already know their own email).
     """
     id: str
     email: str
@@ -77,6 +78,7 @@ class UserResponse(BaseModel):
     subscription: SubscriptionInfo | None = None
     is_admin: bool | None = None  # Optional - only set if user is admin
     email_notifications_enabled: bool = True
+    is_verified: bool = False  # Email verification status (safe to include for authenticated users)
 
 
 @router.get("/me", response_model=UserResponse, response_model_exclude_none=True)
@@ -134,6 +136,7 @@ async def get_current_user_info(
         "full_name": user_data["full_name"],
         "subscription": user_data.get("subscription"),  # Can be None
         "email_notifications_enabled": current_user.email_notifications_enabled,
+        "is_verified": current_user.is_verified,  # Safe to include for authenticated users
     }
     
     # Only add is_admin if it was set (user is admin)
@@ -277,6 +280,7 @@ async def update_current_user(
         "full_name": user_data["full_name"],
         "subscription": user_data.get("subscription"),
         "email_notifications_enabled": current_user.email_notifications_enabled,
+        "is_verified": current_user.is_verified,  # Safe to include for authenticated users
     }
     
     if current_user.is_admin:

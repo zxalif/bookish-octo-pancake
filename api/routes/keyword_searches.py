@@ -16,10 +16,13 @@ from api.dependencies import get_current_user, require_active_subscription
 from models.user import User
 from models.subscription import Subscription
 from models.keyword_search import KeywordSearch
+from models.user_audit_log import UserAuditLog
 from services.subscription_service import SubscriptionService
 from services.opportunity_service import OpportunityService
 from services.usage_service import UsageService
 from core.logger import get_logger
+from slowapi.util import get_remote_address
+from fastapi import Request
 
 logger = get_logger(__name__)
 
@@ -140,6 +143,7 @@ async def list_keyword_searches(
 
 @router.post("/", response_model=KeywordSearchResponse, status_code=status.HTTP_201_CREATED)
 async def create_keyword_search(
+    request: Request,
     search_data: KeywordSearchCreate,
     current_user: User = Depends(get_current_user),
     subscription: Subscription = Depends(require_active_subscription),
@@ -277,6 +281,26 @@ async def create_keyword_search(
         # We'll create it later when generating opportunities
         logger.warning(f"Failed to create search in Rixly (will retry on generate): {str(e)}")
         # Continue without rixly_search_id - it will be created when generating opportunities
+    
+    # Create audit log entry for keyword search creation
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        keywords_summary = ", ".join(search_data.keywords[:5])  # First 5 keywords
+        if len(search_data.keywords) > 5:
+            keywords_summary += f" (+{len(search_data.keywords) - 5} more)"
+        
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="create_keyword_search",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Created keyword search: '{keyword_search.name}', keywords: {keywords_summary}, subreddits: {len(search_data.subreddits or [])}, scraping_mode: {search_data.scraping_mode}"
+        )
+        db.add(audit_log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for keyword search creation: {str(e)}")
     
     # Use Pydantic model to ensure only expected fields are returned
     return KeywordSearchResponse(
@@ -523,6 +547,7 @@ async def recreate_rixly_search(
 
 @router.put("/{search_id}", response_model=KeywordSearchResponse)
 async def update_keyword_search(
+    request: Request,
     search_id: str,
     search_data: KeywordSearchUpdate,
     current_user: User = Depends(get_current_user),
@@ -707,6 +732,39 @@ async def update_keyword_search(
     db.commit()
     db.refresh(search)
     
+    # Create audit log entry for keyword search update
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        # Track what fields were changed
+        changed_fields = []
+        if search_data.name is not None:
+            changed_fields.append(f"name")
+        if search_data.keywords is not None:
+            changed_fields.append(f"keywords ({len(search_data.keywords)} keywords)")
+        if search_data.subreddits is not None:
+            changed_fields.append(f"subreddits ({len(search_data.subreddits)} subreddits)")
+        if search_data.enabled is not None:
+            old_enabled = not search_data.enabled  # Opposite of new value
+            action = "enabled" if search_data.enabled else "disabled"
+            changed_fields.append(f"enabled: {old_enabled} -> {search_data.enabled} ({action})")
+        if search_data.scraping_mode is not None:
+            changed_fields.append(f"scraping_mode: {search_data.scraping_mode}")
+        
+        if changed_fields:
+            audit_log = UserAuditLog(
+                user_id=current_user.id,
+                action="update_keyword_search",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Updated keyword search: '{search.name}' (search_id: {search_id}), changed fields: {', '.join(changed_fields)}"
+            )
+            db.add(audit_log)
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for keyword search update: {str(e)}")
+    
     # Use Pydantic model to ensure only expected fields are returned
     # Note: patterns field is excluded from response for security (internal matching logic)
     return KeywordSearchResponse(
@@ -725,6 +783,7 @@ async def update_keyword_search(
 
 @router.delete("/{search_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_keyword_search(
+    request: Request,
     search_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -757,11 +816,76 @@ async def delete_keyword_search(
             detail="Keyword search not found or already deleted"
         )
     
+    # Store search name and Rixly search ID for audit log and Rixly cleanup
+    search_name = search.name
+    rixly_search_id = search.zola_search_id  # Column name kept for compatibility
+    
+    # Disable/delete search in Rixly to stop scraping
+    # IMPORTANT: This prevents Rixly from continuing to scrape for a deleted search
+    if rixly_search_id:
+        try:
+            # First, try to disable the search in Rixly (safer - preserves historical data)
+            # This stops scheduled scraping without deleting the search
+            disabled = await OpportunityService.disable_keyword_search_in_rixly(rixly_search_id)
+            
+            if disabled:
+                logger.info(
+                    f"Disabled keyword search in Rixly: {rixly_search_id} "
+                    f"(SaaS search_id: {search_id})"
+                )
+            else:
+                # If disable fails, try to delete it (cleaner but removes historical access)
+                logger.warning(
+                    f"Failed to disable Rixly search {rixly_search_id}, attempting deletion..."
+                )
+                deleted = await OpportunityService.delete_keyword_search_in_rixly(rixly_search_id)
+                
+                if deleted:
+                    logger.info(
+                        f"Deleted keyword search from Rixly: {rixly_search_id} "
+                        f"(SaaS search_id: {search_id})"
+                    )
+                else:
+                    logger.warning(
+                        f"Failed to disable or delete Rixly search {rixly_search_id}. "
+                        f"Search may continue scraping. Manual cleanup may be required."
+                    )
+        except Exception as e:
+            # Don't fail the deletion if Rixly is unavailable
+            # The search is still soft-deleted in SaaS, which prevents new operations
+            logger.error(
+                f"Error disabling/deleting Rixly search {rixly_search_id}: {str(e)}. "
+                f"Search was soft-deleted in SaaS but Rixly cleanup failed.",
+                exc_info=True
+            )
+    else:
+        logger.debug(
+            f"Keyword search {search_id} has no Rixly search ID, skipping Rixly cleanup"
+        )
+    
     # Soft delete: mark as deleted but keep in database
     # This prevents abuse: deleted searches still count toward limit until next month
     search.soft_delete()
     search.enabled = False  # Also disable it
     db.commit()
+    
+    # Create audit log entry for keyword search deletion (CRITICAL for GDPR compliance)
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        rixly_info = f", Rixly ID: {rixly_search_id}" if rixly_search_id else ""
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="delete_keyword_search",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Deleted keyword search: '{search_name}' (search_id: {search_id}{rixly_info})"
+        )
+        db.add(audit_log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for keyword search deletion: {str(e)}")
     
     logger.info(
         f"Soft-deleted keyword search {search_id} for user {current_user.id}. "

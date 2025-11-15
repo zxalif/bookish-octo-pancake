@@ -7,10 +7,12 @@ Handles refreshing leads from Rixly and sending email notifications to users.
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
+import asyncio
 
 from models.user import User
 from models.keyword_search import KeywordSearch
 from models.opportunity import Opportunity, OpportunityStatus
+from models.user_audit_log import UserAuditLog
 from services.opportunity_service import OpportunityService
 from services.email_service import EmailService
 from core.logger import get_logger
@@ -39,10 +41,13 @@ class LeadRefreshService:
             dict: Summary of refresh operation
         """
         # Get all active keyword searches for user
+        # IMPORTANT: Skip scheduled searches - webhook handles those to avoid duplicate emails
+        # Only process one_time searches in scheduler refresh
         active_searches = db.query(KeywordSearch).filter(
             KeywordSearch.user_id == user.id,
             KeywordSearch.deleted_at.is_(None),  # type: ignore
-            KeywordSearch.rixly_search_id.isnot(None)  # type: ignore
+            KeywordSearch.zola_search_id.isnot(None),  # type: ignore - zola_search_id stores Rixly search ID
+            KeywordSearch.scraping_mode == "one_time"  # Only refresh one_time searches, webhook handles scheduled
         ).all()
         
         if not active_searches:
@@ -60,8 +65,9 @@ class LeadRefreshService:
         for search in active_searches:
             try:
                 # Fetch latest leads from Rixly
+                # Note: zola_search_id stores the Rixly search ID
                 leads = await OpportunityService.fetch_leads_from_rixly(
-                    rixly_search_id=search.rixly_search_id,  # type: ignore
+                    rixly_search_id=search.zola_search_id,  # type: ignore - zola_search_id stores Rixly search ID
                     limit=100,
                     offset=0
                 )
@@ -115,13 +121,18 @@ class LeadRefreshService:
                 continue
         
         # Send email notification if new leads found and user has notifications enabled
+        # Use asyncio.to_thread to run blocking email sending in a thread pool (non-blocking)
         email_sent = False
         if send_email and total_new_opportunities > 0 and user.email_notifications_enabled:
             try:
-                await LeadRefreshService.send_new_leads_email(
+                # Run email sending in thread pool to avoid blocking scheduler
+                # This allows scheduler to continue processing other users while email is being sent
+                await asyncio.to_thread(
+                    LeadRefreshService._send_new_leads_email_sync,
                     user=user,
                     new_opportunities_count=total_new_opportunities,
-                    searches_with_leads=searches_with_new_leads
+                    searches_with_leads=searches_with_new_leads,
+                    db=db
                 )
                 email_sent = True
             except Exception as e:
@@ -180,6 +191,99 @@ class LeadRefreshService:
             "total_new_opportunities": total_new_opportunities,
             "message": f"Processed {total_users} users, found {total_new_opportunities} new opportunities, sent {users_notified} emails"
         }
+    
+    @staticmethod
+    def _send_new_leads_email_sync(
+        user: User,
+        new_opportunities_count: int,
+        searches_with_leads: List[Dict[str, Any]],
+        db: Session
+    ) -> bool:
+        """
+        Synchronous version of send_new_leads_email for use in thread pool.
+        
+        This method sends the email and creates the audit log in a blocking manner,
+        but is called via asyncio.to_thread() to avoid blocking the scheduler.
+        """
+        try:
+            # Build email content
+            subject = f"🎯 {new_opportunities_count} New Lead{'s' if new_opportunities_count > 1 else ''} Found!"
+            
+            searches_list = "\n".join([
+                f"  • {s['search_name']}: {s['new_count']} new lead{'s' if s['new_count'] > 1 else ''}"
+                for s in searches_with_leads
+            ])
+            
+            message = f"""
+Hi {user.full_name},
+
+Great news! We found {new_opportunities_count} new lead{'s' if new_opportunities_count > 1 else ''} matching your keyword searches:
+
+{searches_list}
+
+Log in to your dashboard to view and contact these leads:
+https://clienthunt.app/dashboard/opportunities
+
+Happy hunting!
+
+Best regards,
+The ClientHunt Team
+            """.strip()
+            
+            # Create HTML version of email
+            html_body = f"""
+            <html>
+              <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <h2 style="color: #2563eb;">🎯 {new_opportunities_count} New Lead{'s' if new_opportunities_count > 1 else ''} Found!</h2>
+                <p>Hi {user.full_name},</p>
+                <p>Great news! We found {new_opportunities_count} new lead{'s' if new_opportunities_count > 1 else ''} matching your keyword searches:</p>
+                <ul style="list-style-type: none; padding-left: 0;">
+                  {''.join([f'<li style="margin: 10px 0;">• <strong>{s["search_name"]}</strong>: {s["new_count"]} new lead{"s" if s["new_count"] > 1 else ""}</li>' for s in searches_with_leads])}
+                </ul>
+                <p style="margin: 30px 0;">
+                  <a href="https://clienthunt.app/dashboard/opportunities" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">View Leads in Dashboard</a>
+                </p>
+                <p>Happy hunting!</p>
+                <p>Best regards,<br>The ClientHunt Team</p>
+              </body>
+            </html>
+            """
+            
+            # Use leads@clienthunt.app as sender for consistency with webhook emails
+            from_email = "leads@clienthunt.app"
+            from_name = "ClientHunt Leads"
+            
+            # Send email (synchronous call)
+            email_sent = EmailService._send_email(
+                to_email=user.email,
+                subject=subject,
+                html_body=html_body,
+                text_body=message,
+                from_email=from_email,
+                from_name=from_name
+            )
+            
+            if email_sent:
+                # Create audit log entry for email notification
+                try:
+                    searches_summary = ", ".join([f"{s['search_name']}: {s['new_count']}" for s in searches_with_leads])
+                    audit_log = UserAuditLog(
+                        user_id=user.id,
+                        action="leads_notification_email_sent",
+                        ip_address=None,  # Scheduler doesn't have IP
+                        user_agent="Scheduler Service",
+                        details=f"Lead notification email sent via scheduler: total_leads={new_opportunities_count}, searches={searches_summary}, scraping_mode=one_time"
+                    )
+                    db.add(audit_log)
+                    db.commit()
+                except Exception as e:
+                    # Don't fail email sending if audit log fails
+                    logger.warning(f"Failed to create audit log for leads notification email: {str(e)}")
+            
+            return email_sent
+        except Exception as e:
+            logger.error(f"Error in _send_new_leads_email_sync for user {user.id}: {str(e)}", exc_info=True)
+            return False
     
     @staticmethod
     async def send_new_leads_email(
@@ -243,10 +347,16 @@ The ClientHunt Team
         </html>
         """
         
+        # Use leads@clienthunt.app as sender for consistency with webhook emails
+        from_email = "leads@clienthunt.app"
+        from_name = "ClientHunt Leads"
+        
         return EmailService._send_email(
             to_email=user.email,
             subject=subject,
             html_body=html_body,
-            text_body=message
+            text_body=message,
+            from_email=from_email,
+            from_name=from_name
         )
 

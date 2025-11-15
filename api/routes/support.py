@@ -15,7 +15,9 @@ from api.middleware.rate_limit import limiter
 from models.user import User
 from models.support_thread import SupportThread
 from models.support_message import SupportMessage
+from models.user_audit_log import UserAuditLog
 from services.support_service import SupportService
+from slowapi.util import get_remote_address
 
 logger = get_logger(__name__)
 
@@ -171,6 +173,26 @@ async def create_support_thread(
         db
     )
     
+    # Create audit log entry for support thread creation
+    try:
+        ip_address = get_remote_address(request)
+        user_agent = request.headers.get("user-agent", "")
+        
+        # Sanitize subject for audit log (limit length, remove sensitive info)
+        sanitized_subject = thread_data.subject.strip()[:100]  # Limit to 100 chars
+        
+        audit_log = UserAuditLog(
+            user_id=current_user.id,
+            action="create_support_thread",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=f"Created support thread: '{sanitized_subject}' (thread_id: {thread.id})"
+        )
+        db.add(audit_log)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to create audit log for support thread creation: {str(e)}")
+    
     return thread.to_dict()
 
 
@@ -213,6 +235,27 @@ async def add_message_to_thread(
             message_data.content.strip(),
             db
         )
+        
+        # Create audit log entry for support message sent
+        try:
+            ip_address = get_remote_address(request)
+            user_agent = request.headers.get("user-agent", "")
+            
+            # Log message length (not content for privacy)
+            message_length = len(message_data.content.strip())
+            
+            audit_log = UserAuditLog(
+                user_id=current_user.id,
+                action="send_support_message",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Sent support message to thread {thread_id}, message length: {message_length} characters"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for support message: {str(e)}")
+        
         return message.to_dict()
     except ValueError as e:
         error_message = str(e)

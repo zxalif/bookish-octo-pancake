@@ -152,6 +152,67 @@ services:
           cpus: '1'
           memory: 1G
 
+  # ===== E2E Test Worker Service =====
+  e2e-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-worker
+    container_name: clienthunt-e2e-worker
+    network_mode: host  # Use host network - same as API
+    environment:
+      # Database (Native PostgreSQL on host)
+      - DATABASE_URL=${DATABASE_URL}
+      
+      # Redis Cache (Native Redis on host, for job queue)
+      - REDIS_URL=${REDIS_URL}
+      
+      # API Configuration (for test execution)
+      # Production: Use actual domain URLs
+      - API_URL=${API_URL:-https://api.clienthunt.app}
+      - FRONTEND_URL=${FRONTEND_URL:-https://clienthunt.app}
+      
+      # Application Settings
+      - APP_NAME=ClientHunt
+      - DEBUG=False
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/app/logs/e2e-worker.log
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      # Playwright settings
+      - PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+      # Security: Disable watch mode in production
+      - WATCH_MODE=false
+    volumes:
+      # Logs volume (read-write for logs)
+      - e2e_worker_logs:/app/logs
+      # Persist Playwright browser cache (read-write for browser cache)
+      - playwright_browsers:/app/.cache/ms-playwright
+    # Security: Run as non-root user (created in Dockerfile)
+    user: "1000:1000"
+    # Security: Read-only root filesystem (except volumes)
+    read_only: true
+    # Security: Temporary filesystem for /tmp
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    restart: unless-stopped
+    healthcheck:
+      # Check if worker process is running (works with non-root user)
+      test: ["CMD", "pgrep", "-f", "run_e2e_worker.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Give time for Playwright installation
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G  # More memory for Playwright browsers
+        reservations:
+          cpus: '1'
+          memory: 2G
+
 # ===== Volumes =====
 # NOTE: No networks section needed with host network mode
 volumes:
@@ -161,4 +222,10 @@ volumes:
   scheduler_logs:
     driver: local
     name: clienthunt-scheduler-logs
+  e2e_worker_logs:
+    driver: local
+    name: clienthunt-e2e-worker-logs
+  playwright_browsers:
+    driver: local
+    name: clienthunt-playwright-browsers
 

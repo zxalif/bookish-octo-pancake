@@ -8,7 +8,7 @@ from sqlalchemy import Column, String, ForeignKey, Boolean, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 import enum
 
-from models.base import generate_uuid, TimestampMixin
+from models.base import generate_uuid, TimestampMixin, format_utc_datetime
 from core.database import Base
 
 
@@ -43,6 +43,6 @@ class SupportMessage(Base, TimestampMixin):
             "content": self.content,
             "sender": self.sender.value,
             "read": self.read,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": format_utc_datetime(self.created_at),  # Format with UTC indicator
         }
 

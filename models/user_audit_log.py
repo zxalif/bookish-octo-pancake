@@ -9,7 +9,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 
 from core.database import Base
-from models.base import generate_uuid, TimestampMixin
+from models.base import generate_uuid, TimestampMixin, format_utc_datetime
 
 
 class UserAuditLog(Base, TimestampMixin):
@@ -71,6 +71,6 @@ class UserAuditLog(Base, TimestampMixin):
             "ip_address": self.ip_address,
             "user_agent": self.user_agent,
             "details": self.details,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": format_utc_datetime(self.created_at),  # Format with UTC indicator
         }
 

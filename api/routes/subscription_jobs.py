@@ -209,3 +209,45 @@ async def refresh_usage_metrics_job(
             detail=f"Error refreshing usage metrics: {str(e)}"
         )
 
+
+@router.post("/run-e2e-test")
+async def run_e2e_test_job(
+    _: bool = Depends(verify_service_token),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Queue end-to-end test job in Redis for worker service.
+    
+    This job queues the E2E test in Redis for the isolated worker service to process.
+    Can be triggered:
+    - Automatically every hour
+    - After deployments
+    - Manually via admin panel
+    
+    **Authentication**: Service token required
+    
+    **Cron Schedule**: `0 * * * *` (every hour)
+    
+    **Response 200**:
+    - Job queued confirmation
+    """
+    try:
+        from api.routes.e2e_tests import queue_e2e_test_job
+        
+        logger.info("Queuing scheduled E2E test job")
+        job_id = queue_e2e_test_job(triggered_by="scheduled")
+        
+        logger.info(f"Scheduled E2E test job queued: {job_id}")
+        
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "E2E test job queued. Worker service will process it shortly."
+        }
+    except Exception as e:
+        logger.error(f"Error queuing E2E test job: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error queuing E2E test job: {str(e)}"
+        )
+

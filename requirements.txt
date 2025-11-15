@@ -47,6 +47,9 @@ pytest==8.3.3
 pytest-asyncio==0.24.0
 pytest-cov==6.0.0
 
+# Note: Playwright and watchfiles are NOT included here - they're only installed in Dockerfile.e2e-worker
+# This keeps the API container lightweight since it doesn't need these E2E testing dependencies
+
 # Monitoring
 sentry-sdk[fastapi]==2.8.0  # Fixed: GHSA-g92j-qhmh-64v2
 

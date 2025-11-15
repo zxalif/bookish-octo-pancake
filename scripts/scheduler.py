@@ -213,6 +213,44 @@ def refresh_leads_job():
         db.close()
 
 
+def run_e2e_test_job():
+    """Queue E2E test job in Redis (run every hour)."""
+    try:
+        import json
+        import uuid
+        from datetime import datetime
+        from core.redis_client import get_redis_client, is_redis_available
+        
+        # Check Redis availability
+        if not is_redis_available():
+            logger.warning("Redis not available, cannot queue E2E test job")
+            return {"status": "error", "message": "Redis not available"}
+        
+        redis_client = get_redis_client()
+        if not redis_client:
+            logger.warning("Failed to get Redis client, cannot queue E2E test job")
+            return {"status": "error", "message": "Failed to get Redis client"}
+        
+        # Generate job ID
+        job_id = str(uuid.uuid4())
+        
+        # Create job data
+        job_data = {
+            "job_id": job_id,
+            "triggered_by": "scheduled",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        # Push job to Redis queue
+        redis_client.rpush("e2e_test_jobs", json.dumps(job_data))
+        
+        logger.info(f"Queued scheduled E2E test job: {job_id}")
+        return {"status": "queued", "job_id": job_id}
+    except Exception as e:
+        logger.error(f"Error queuing E2E test job: {str(e)}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
 def should_run_job(job_name: str, current_hour: int, current_minute: int, current_day: int) -> bool:
     """
     Determine if a job should run based on current time.
@@ -236,6 +274,7 @@ def should_run_job(job_name: str, current_hour: int, current_minute: int, curren
         "check_upcoming_renewals": lambda h, m, d: h == 9 and m == 0,  # Daily at 9 AM
         "refresh_leads": lambda h, m, d: h in [0, 6, 12, 18] and m == 0,  # Every 6 hours at minute 0
         "monthly_cleanup": lambda h, m, d: d == 1 and h == 0 and m == 1,  # 1st of month at 00:01
+        "run_e2e_test": lambda h, m, d: m == 0,  # Run every hour at minute 0
     }
     
     schedule_func = job_schedules.get(job_name)
@@ -425,6 +464,13 @@ def main():
                    (now - last_run_times["check_upcoming_renewals"]).days >= 1:
                     if submit_job("check_upcoming_renewals", check_upcoming_renewals_job):
                         last_run_times["check_upcoming_renewals"] = now
+            
+            # Run E2E tests (every hour)
+            if should_run_job("run_e2e_test", current_hour, current_minute, current_day):
+                if "run_e2e_test" not in last_run_times or \
+                   (now - last_run_times["run_e2e_test"]).total_seconds() >= 3600:  # 1 hour
+                    if submit_job("run_e2e_test", run_e2e_test_job):
+                        last_run_times["run_e2e_test"] = now
             
             # Monthly cleanup (1st of month at 00:01)
             if should_run_job("monthly_cleanup", current_hour, current_minute, current_day):

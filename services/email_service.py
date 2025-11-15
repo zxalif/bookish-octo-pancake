@@ -10,6 +10,7 @@ Handles email sending for:
 
 from typing import Optional
 import smtplib
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -43,6 +44,67 @@ logger = get_logger(__name__)
 
 class EmailService:
     """Service for sending emails."""
+    
+    # Retry configuration
+    MAX_RETRIES = 3
+    INITIAL_RETRY_DELAY = 1  # seconds
+    MAX_RETRY_DELAY = 8  # seconds
+    
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        """
+        Determine if an SMTP error is retryable (temporary failure).
+        
+        Retryable errors:
+        - Temporary authentication failures (error code 454)
+        - Connection errors (network issues)
+        - Timeout errors
+        - Temporary SMTP errors (4xx codes that are temporary)
+        
+        Non-retryable errors:
+        - Permanent authentication failures (wrong credentials)
+        - Invalid email addresses
+        - Permanent SMTP errors (5xx codes that are permanent)
+        
+        Args:
+            error: Exception to check
+            
+        Returns:
+            bool: True if error is retryable, False otherwise
+        """
+        # Temporary authentication failures (e.g., error 454)
+        if isinstance(error, smtplib.SMTPAuthenticationError):
+            # Error code 454 indicates temporary authentication failure
+            # Error code 535 indicates permanent authentication failure (wrong credentials)
+            if hasattr(error, 'smtp_code'):
+                if error.smtp_code == 454:
+                    return True  # Temporary failure - retry
+                elif error.smtp_code == 535:
+                    return False  # Permanent failure - don't retry
+            # Check error message for temporary indicators
+            error_msg = str(error).lower()
+            if 'temporary' in error_msg or 'connection lost' in error_msg:
+                return True
+            return False  # Default: don't retry authentication errors
+        
+        # Connection errors are usually temporary (network issues)
+        if isinstance(error, smtplib.SMTPConnectError):
+            return True
+        
+        # Timeout errors are temporary
+        if isinstance(error, (smtplib.SMTPServerDisconnected, TimeoutError)):
+            return True
+        
+        # Other SMTP exceptions - check if they're temporary
+        if isinstance(error, smtplib.SMTPException):
+            error_msg = str(error).lower()
+            # Temporary errors often contain these keywords
+            if any(keyword in error_msg for keyword in ['temporary', 'timeout', 'connection', 'network']):
+                return True
+            return False
+        
+        # For other exceptions, don't retry (likely programming errors)
+        return False
     
     @staticmethod
     def _create_smtp_connection():
@@ -118,7 +180,13 @@ class EmailService:
         from_name: Optional[str] = None
     ) -> bool:
         """
-        Send email via SMTP.
+        Send email via SMTP with retry logic for temporary failures.
+        
+        Implements exponential backoff retry for temporary SMTP errors:
+        - Retries up to MAX_RETRIES times (default: 3)
+        - Uses exponential backoff: 1s, 2s, 4s (capped at MAX_RETRY_DELAY)
+        - Only retries temporary errors (connection issues, temporary auth failures)
+        - Does not retry permanent errors (wrong credentials, invalid email)
         
         Args:
             to_email: Recipient email address
@@ -131,49 +199,108 @@ class EmailService:
         Returns:
             bool: True if sent successfully, False otherwise
         """
-        try:
-            # Use provided from_email/from_name or fall back to defaults
-            sender_email = from_email or settings.SMTP_FROM_EMAIL
-            sender_name = from_name or settings.SMTP_FROM_NAME
-            
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From'] = f"{sender_name} <{sender_email}>"
-            msg['To'] = to_email
-            
-            # Add text and HTML parts
-            if text_body:
-                text_part = MIMEText(text_body, 'plain')
-                msg.attach(text_part)
-            
-            html_part = MIMEText(html_body, 'html')
-            msg.attach(html_part)
-            
-            # Send email
-            server = EmailService._create_smtp_connection()
+        # Use provided from_email/from_name or fall back to defaults
+        sender_email = from_email or settings.SMTP_FROM_EMAIL
+        sender_name = from_name or settings.SMTP_FROM_NAME
+        
+        # Create message once (reused for retries)
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = f"{sender_name} <{sender_email}>"
+        msg['To'] = to_email
+        
+        # Add text and HTML parts
+        if text_body:
+            text_part = MIMEText(text_body, 'plain')
+            msg.attach(text_part)
+        
+        html_part = MIMEText(html_body, 'html')
+        msg.attach(html_part)
+        
+        # Retry loop with exponential backoff
+        last_error = None
+        for attempt in range(EmailService.MAX_RETRIES):
             try:
-                server.send_message(msg)
-                logger.info(f"Email sent successfully to {to_email} (subject: {subject})")
-                return True
-            finally:
+                # Send email
+                server = EmailService._create_smtp_connection()
                 try:
-                    server.quit()
-                except Exception:
-                    pass  # Ignore errors when closing connection
-            
-        except smtplib.SMTPAuthenticationError as e:
-            logger.error(
-                f"SMTP authentication failed when sending to {to_email}. "
-                f"This might be due to: 1) IP restrictions on email provider (PrivateEmail may block VPS IPs), "
-                f"2) Different network in production vs localhost, 3) Account security settings, "
-                f"4) Need to whitelist VPS IP in email provider settings. "
-                f"Error code: {e.smtp_code}, Error: {e.smtp_error}"
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {str(e)}", exc_info=True)
-            return False
+                    server.send_message(msg)
+                    if attempt > 0:
+                        logger.info(
+                            f"Email sent successfully to {to_email} on attempt {attempt + 1} "
+                            f"(subject: {subject})"
+                        )
+                    else:
+                        logger.info(f"Email sent successfully to {to_email} (subject: {subject})")
+                    return True
+                finally:
+                    try:
+                        server.quit()
+                    except Exception:
+                        pass  # Ignore errors when closing connection
+                        
+            except Exception as e:
+                last_error = e
+                
+                # Check if error is retryable
+                if not EmailService._is_retryable_error(e):
+                    # Permanent error - don't retry
+                    if isinstance(e, smtplib.SMTPAuthenticationError):
+                        logger.error(
+                            f"SMTP authentication failed when sending to {to_email} (permanent failure). "
+                            f"This might be due to: 1) Wrong credentials, 2) IP restrictions on email provider, "
+                            f"3) Account security settings, 4) Need to whitelist VPS IP in email provider settings. "
+                            f"Error code: {getattr(e, 'smtp_code', 'unknown')}, "
+                            f"Error: {getattr(e, 'smtp_error', str(e))}"
+                        )
+                    else:
+                        logger.error(
+                            f"Permanent SMTP error when sending to {to_email}: {type(e).__name__}: {str(e)}",
+                            exc_info=True
+                        )
+                    return False
+                
+                # Temporary error - retry if attempts remaining
+                if attempt < EmailService.MAX_RETRIES - 1:
+                    # Calculate exponential backoff delay
+                    delay = min(
+                        EmailService.INITIAL_RETRY_DELAY * (2 ** attempt),
+                        EmailService.MAX_RETRY_DELAY
+                    )
+                    
+                    error_info = ""
+                    if isinstance(e, smtplib.SMTPAuthenticationError):
+                        error_info = f" (error code: {getattr(e, 'smtp_code', 'unknown')})"
+                    elif isinstance(e, smtplib.SMTPConnectError):
+                        error_info = " (connection error)"
+                    
+                    logger.warning(
+                        f"Temporary SMTP error when sending to {to_email} (attempt {attempt + 1}/{EmailService.MAX_RETRIES})"
+                        f"{error_info}: {type(e).__name__}: {str(e)}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    
+                    time.sleep(delay)
+                else:
+                    # Last attempt failed
+                    if isinstance(e, smtplib.SMTPAuthenticationError):
+                        logger.error(
+                            f"SMTP authentication failed when sending to {to_email} after {EmailService.MAX_RETRIES} attempts. "
+                            f"This might be due to: 1) IP restrictions on email provider (PrivateEmail may block VPS IPs), "
+                            f"2) Different network in production vs localhost, 3) Account security settings, "
+                            f"4) Need to whitelist VPS IP in email provider settings. "
+                            f"Error code: {getattr(e, 'smtp_code', 'unknown')}, "
+                            f"Error: {getattr(e, 'smtp_error', str(e))}"
+                        )
+                    else:
+                        logger.error(
+                            f"Failed to send email to {to_email} after {EmailService.MAX_RETRIES} attempts: "
+                            f"{type(e).__name__}: {str(e)}",
+                            exc_info=True
+                        )
+        
+        # All retries exhausted
+        return False
     
     @staticmethod
     async def send_verification_email(email: str, user_id: str, token: str) -> bool:
@@ -191,19 +318,30 @@ class EmailService:
         verification_url = f"{settings.FRONTEND_URL}/verify-email?token={token}&user_id={user_id}"
         
         subject = "Verify Your ClientHunt Account"
+        logo_url = f"{settings.FRONTEND_URL}/logo.png"
         html_body = f"""
         <html>
-          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-              <h2 style="color: #2563eb;">Welcome to ClientHunt!</h2>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f9fafb;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+              <!-- Logo Header -->
+              <div style="text-align: center; margin-bottom: 30px; padding: 20px 0;">
+                <img src="{logo_url}" alt="ClientHunt Logo" style="max-width: 200px; height: auto;" />
+              </div>
+              
+              <h2 style="color: #2563eb; margin-top: 0;">Welcome to ClientHunt!</h2>
               <p>Thank you for signing up! Please verify your email address to complete your registration.</p>
               <p style="margin: 30px 0;">
-                <a href="{verification_url}" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Verify Email Address</a>
+                <a href="{verification_url}" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Verify Email Address</a>
               </p>
-              <p>Or copy and paste this URL into your browser:</p>
-              <p style="background-color: #f3f4f6; padding: 10px; border-radius: 4px; word-break: break-all; font-size: 12px; color: #6b7280;">{verification_url}</p>
+              <p style="color: #6b7280; font-size: 14px;">Or copy and paste this URL into your browser:</p>
+              <p style="background-color: #f3f4f6; padding: 10px; border-radius: 4px; word-break: break-all; font-size: 12px; color: #6b7280; margin: 10px 0;">{verification_url}</p>
               <p style="color: #6b7280; font-size: 14px;">This link will expire in 24 hours.</p>
               <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">If you didn't create an account, please ignore this email.</p>
+              
+              <!-- Footer -->
+              <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center; color: #9ca3af; font-size: 12px;">
+                <p>© {datetime.now().year} ClientHunt. All rights reserved.</p>
+              </div>
             </div>
           </body>
         </html>
@@ -259,16 +397,31 @@ class EmailService:
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}&user_id={user.id}"
         
         subject = "Reset Your ClientHunt Password"
+        logo_url = f"{settings.FRONTEND_URL}/logo.png"
         html_body = f"""
         <html>
-          <body>
-            <h2>Password Reset Request</h2>
-            <p>You requested to reset your password. Click the link below to reset it:</p>
-            <p><a href="{reset_url}">Reset Password</a></p>
-            <p>Or copy and paste this URL into your browser:</p>
-            <p>{reset_url}</p>
-            <p>This link will expire in 1 hour.</p>
-            <p>If you didn't request a password reset, please ignore this email.</p>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f9fafb;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+              <!-- Logo Header -->
+              <div style="text-align: center; margin-bottom: 30px; padding: 20px 0;">
+                <img src="{logo_url}" alt="ClientHunt Logo" style="max-width: 200px; height: auto;" />
+              </div>
+              
+              <h2 style="color: #2563eb; margin-top: 0;">Password Reset Request</h2>
+              <p>You requested to reset your password. Click the link below to reset it:</p>
+              <p style="margin: 30px 0;">
+                <a href="{reset_url}" style="background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600;">Reset Password</a>
+              </p>
+              <p style="color: #6b7280; font-size: 14px;">Or copy and paste this URL into your browser:</p>
+              <p style="background-color: #f3f4f6; padding: 10px; border-radius: 4px; word-break: break-all; font-size: 12px; color: #6b7280; margin: 10px 0;">{reset_url}</p>
+              <p style="color: #6b7280; font-size: 14px;">This link will expire in 1 hour.</p>
+              <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">If you didn't request a password reset, please ignore this email.</p>
+              
+              <!-- Footer -->
+              <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center; color: #9ca3af; font-size: 12px;">
+                <p>© {datetime.now().year} ClientHunt. All rights reserved.</p>
+              </div>
+            </div>
           </body>
         </html>
         """

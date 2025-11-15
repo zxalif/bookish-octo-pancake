@@ -4,7 +4,7 @@ Authentication Routes
 Handles user registration, login, and password reset.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -89,6 +89,7 @@ class UserResponse(BaseModel):
 async def register(
     request: Request,
     user_data: UserRegister,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """
@@ -155,11 +156,20 @@ async def register(
         # Auto-create free subscription for new user (1-month free tier)
         SubscriptionService.create_free_subscription(user.id, db)
         
-        # Generate verification token and send verification email
+        # Generate verification token
         verification_token = AuthService.generate_email_verification_token(user.id)
-        await EmailService.send_verification_email(user.email, user.id, verification_token)
         
+        # Commit user and subscription first
         db.commit()
+        
+        # Send verification email asynchronously (non-blocking)
+        # This prevents blocking the registration response while waiting for SMTP
+        background_tasks.add_task(
+            EmailService.send_verification_email,
+            user.email,
+            user.id,
+            verification_token
+        )
         
         token_data = AuthService.create_token_for_user(user)
         
@@ -211,6 +221,25 @@ async def login(
     )
     
     if not user:
+        # Log failed login attempt (user doesn't exist or wrong password)
+        # Hash email to prevent enumeration while still tracking
+        import hashlib
+        email_hash = hashlib.sha256(credentials.email.encode()).hexdigest()[:16]
+        
+        try:
+            audit_log = UserAuditLog(
+                user_id=None,  # No user for failed attempts
+                action="login_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed login attempt for email hash: {email_hash}, reason: incorrect_email_or_password"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            # Don't fail login if audit log fails
+            logger.warning(f"Failed to create audit log for failed login: {str(e)}")
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -219,6 +248,20 @@ async def login(
     
     # Check if user is banned
     if user.is_banned:
+        # Log failed login attempt (banned user)
+        try:
+            audit_log = UserAuditLog(
+                user_id=user.id,
+                action="login_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed login attempt, reason: account_banned"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for banned login: {str(e)}")
+        
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your account has been banned. Please contact support for assistance.",
@@ -226,6 +269,20 @@ async def login(
     
     # Check if email is verified
     if not user.is_verified:
+        # Log failed login attempt (email not verified)
+        try:
+            audit_log = UserAuditLog(
+                user_id=user.id,
+                action="login_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed login attempt, reason: email_not_verified"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for unverified login: {str(e)}")
+        
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email not verified. Please check your email and verify your account before logging in.",
@@ -324,6 +381,7 @@ class ForgotPasswordRequest(BaseModel):
 async def forgot_password(
     request: Request,
     forgot_data: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """
@@ -349,24 +407,33 @@ async def forgot_password(
     # Get user if exists (for audit logging)
     user = AuthService.get_user_by_email(forgot_data.email, db)
     
-    # Send reset email if user exists (but don't reveal if they don't)
-    email_sent = await AuthService.send_password_reset_email(forgot_data.email, db)
-    
-    # Create audit log entry if user exists
+    # Create audit log entry if user exists (before async email send)
     if user:
+        # Include verification status in audit log
+        verification_status = "verified" if user.is_verified else "unverified"
         audit_log = UserAuditLog(
             user_id=user.id,
             action="forgot_password",
             ip_address=ip_address,
             user_agent=user_agent,
-            details=f"Password reset requested for email: {forgot_data.email}"
+            details=f"Password reset requested for email: {forgot_data.email}, user status: {verification_status}"
         )
         db.add(audit_log)
         db.commit()
     
-    # Always return success to prevent email enumeration
+    # Send reset email asynchronously (non-blocking)
+    # This prevents blocking the API response while waiting for SMTP
+    background_tasks.add_task(
+        AuthService.send_password_reset_email,
+        forgot_data.email,
+        db
+    )
+    
+    # Always return success immediately to prevent email enumeration
+    # Note: Password reset works for both verified and unverified users
+    # Unverified users can reset password but still need to verify email to login
     return {
-        "message": "If an account with that email exists, a password reset link has been sent."
+        "message": "If an account with that email exists, a password reset link has been sent. Note: If your email is not verified, you will still need to verify it after resetting your password to log in."
     }
 
 
@@ -416,6 +483,23 @@ async def reset_password(
     user = AuthService.verify_password_reset_token(reset_data.token, db)
     
     if not user:
+        # Log failed password reset attempt
+        try:
+            # Hash token to prevent token enumeration while still tracking
+            import hashlib
+            token_hash = hashlib.sha256(reset_data.token.encode()).hexdigest()[:16]
+            audit_log = UserAuditLog(
+                user_id=None,  # No user for invalid tokens
+                action="reset_password_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed password reset attempt, token hash: {token_hash}, reason: invalid_or_expired_token"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for failed password reset: {str(e)}")
+        
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired password reset token"
@@ -425,18 +509,27 @@ async def reset_password(
     user.password_hash = get_password_hash(reset_data.new_password)
     
     # Create audit log entry for password reset
+    verification_status = "verified" if user.is_verified else "unverified"
     audit_log = UserAuditLog(
         user_id=user.id,
         action="reset_password",
         ip_address=ip_address,
         user_agent=user_agent,
-        details="Password reset completed successfully"
+        details=f"Password reset completed successfully, user status: {verification_status}"
     )
     db.add(audit_log)
     db.commit()
     
+    # Provide helpful message based on verification status
+    if not user.is_verified:
+        return {
+            "message": "Password reset successfully. However, your email is not yet verified. Please verify your email address to log in. Check your inbox for the verification email, or use the resend verification feature.",
+            "email_verified": False
+        }
+    
     return {
-        "message": "Password reset successfully"
+        "message": "Password reset successfully. You can now log in with your new password.",
+        "email_verified": True
     }
 
 
@@ -526,13 +619,38 @@ async def verify_email(
     **Response 400**: Invalid or expired token
     **Response 429**: Rate limit exceeded
     """
+    # Get IP address for audit logging (before any checks)
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
     # First, get the user by user_id to check if they exist
+    # SECURITY: Don't reveal if user exists or not - return same error as invalid token
     user_by_id = AuthService.get_user_by_id(verify_data.user_id, db)
     
     if not user_by_id:
+        # Log failed verification attempt (user not found)
+        try:
+            audit_log = UserAuditLog(
+                user_id=None,  # No user for invalid user_id
+                action="verify_email_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed email verification attempt, reason: user_not_found (user_id: {verify_data.user_id[:8]}...)"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for failed email verification: {str(e)}")
+        
+        # Return same error as invalid token to prevent user enumeration
+        # Don't reveal if user exists or not
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Invalid or expired verification token. The link may have expired (24 hours) or already been used.",
+                "error_code": "verification_token_expired",
+                "suggestion": "Please request a new verification email. If you are logged in, use the 'Resend Verification Email' button, or use the /auth/resend-verification endpoint with your email address."
+            }
         )
     
     # Check if already verified
@@ -554,6 +672,20 @@ async def verify_email(
     user = AuthService.verify_email_token(verify_data.token, db)
     
     if not user:
+        # Log failed email verification attempt
+        try:
+            audit_log = UserAuditLog(
+                user_id=verify_data.user_id,  # User ID from request
+                action="verify_email_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed email verification attempt, reason: invalid_or_expired_token"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for failed email verification: {str(e)}")
+        
         # Check if Redis is available
         if not redis_client:
             raise HTTPException(
@@ -565,19 +697,33 @@ async def verify_email(
         # Provide helpful error message with resend option
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid or expired verification token. The link may have expired (24 hours) or already been used. Please request a new verification email by logging in or using the resend verification feature."
+            detail={
+                "message": "Invalid or expired verification token. The link may have expired (24 hours) or already been used.",
+                "error_code": "verification_token_expired",
+                "suggestion": "Please request a new verification email. If you are logged in, use the 'Resend Verification Email' button, or use the /auth/resend-verification endpoint with your email address."
+            }
         )
     
     # Verify user_id matches (extra security check)
     if user.id != verify_data.user_id:
+        # Log failed email verification attempt (token mismatch)
+        try:
+            audit_log = UserAuditLog(
+                user_id=verify_data.user_id,  # User ID from request
+                action="verify_email_failed",
+                ip_address=ip_address,
+                user_agent=user_agent,
+                details=f"Failed email verification attempt, reason: token_user_mismatch"
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to create audit log for failed email verification: {str(e)}")
+        
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token does not match user"
         )
-    
-    # Get IP address from request for audit logging
-    ip_address = get_remote_address(request)
-    user_agent = request.headers.get("user-agent", "")
     
     # Mark email as verified
     user.is_verified = True
@@ -646,10 +792,11 @@ class ResendVerificationRequest(BaseModel):
 async def resend_verification_email(
     request: Request,
     resend_data: ResendVerificationRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """
-    Resend email verification link.
+    Resend email verification link (unauthenticated).
     
     Sends a new verification email if the user exists and is not yet verified.
     Always returns success to prevent email enumeration attacks.
@@ -661,6 +808,8 @@ async def resend_verification_email(
     
     **Response 200**: Success message (always returns success for security)
     **Response 429**: Rate limit exceeded
+    
+    **Note**: If you are logged in, use `/auth/resend-verification-authenticated` instead.
     """
     # Get IP address from request for audit logging
     ip_address = get_remote_address(request)
@@ -669,11 +818,10 @@ async def resend_verification_email(
     user = AuthService.get_user_by_email(resend_data.email, db)
     
     if user and not user.is_verified:
-        # Generate new verification token and send email
+        # Generate new verification token
         verification_token = AuthService.generate_email_verification_token(user.id)
-        await EmailService.send_verification_email(user.email, user.id, verification_token)
         
-        # Create audit log entry for resend verification
+        # Create audit log entry for resend verification (before async email send)
         audit_log = UserAuditLog(
             user_id=user.id,
             action="resend_verification",
@@ -683,8 +831,76 @@ async def resend_verification_email(
         )
         db.add(audit_log)
         db.commit()
+        
+        # Send verification email asynchronously (non-blocking)
+        background_tasks.add_task(
+            EmailService.send_verification_email,
+            user.email,
+            user.id,
+            verification_token
+        )
     
-    # Always return success to prevent email enumeration
+    # Always return success immediately to prevent email enumeration
     return {
         "message": "If an account with that email exists and is not verified, a verification email has been sent."
+    }
+
+
+@router.post("/resend-verification-authenticated", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
+async def resend_verification_email_authenticated(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Resend email verification link (authenticated).
+    
+    Sends a new verification email to the currently authenticated user if not yet verified.
+    No email address required - uses the logged-in user's email.
+    
+    **Authentication Required**: Yes (JWT token)
+    **SECURITY**: Rate limited to 5 requests per minute per IP to prevent abuse.
+    
+    **Response 200**: Success message
+    **Response 400**: User is already verified
+    **Response 401**: Not authenticated
+    **Response 429**: Rate limit exceeded
+    """
+    # Check if already verified
+    if current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Your email is already verified."
+        )
+    
+    # Get IP address from request for audit logging
+    ip_address = get_remote_address(request)
+    user_agent = request.headers.get("user-agent", "")
+    
+    # Generate new verification token
+    verification_token = AuthService.generate_email_verification_token(current_user.id)
+    
+    # Create audit log entry (before async email send)
+    audit_log = UserAuditLog(
+        user_id=current_user.id,
+        action="resend_verification",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details=f"Verification email resent for authenticated user: {current_user.email}"
+    )
+    db.add(audit_log)
+    db.commit()
+    
+    # Send verification email asynchronously (non-blocking)
+    background_tasks.add_task(
+        EmailService.send_verification_email,
+        current_user.email,
+        current_user.id,
+        verification_token
+    )
+    
+    return {
+        "message": "A new verification email has been sent to your email address."
     }

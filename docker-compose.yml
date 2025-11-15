@@ -49,6 +49,10 @@ services:
       - API_URL=http://localhost:7300
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:9100}
       
+      # CORS Configuration (for development)
+      # Include host.docker.internal for E2E tests running in Docker
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:9100,http://localhost:3000,http://localhost:9200,http://host.docker.internal:9100,https://clienthunt.app,https://www.clienthunt.app,https://admin.clienthunt.app}
+      
       # Redis Cache
       - REDIS_URL=redis://redis:6379
       
@@ -201,6 +205,73 @@ services:
       retries: 3
       start_period: 10s
 
+  # ===== E2E Test Worker Service =====
+  e2e-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-worker
+    container_name: freelancehunt-e2e-worker
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://freelancehunt:freelancehunt123@postgres:5432/freelancehunt
+      
+      # Redis Cache (for job queue)
+      - REDIS_URL=redis://redis:6379
+      
+      # API Configuration (for test execution)
+      # Use host.docker.internal to access services on the host machine
+      # On Linux, you may need to add extra_hosts: - "host.docker.internal:host-gateway"
+      - API_URL=${API_URL:-http://host.docker.internal:7300}
+      - FRONTEND_URL=${FRONTEND_URL:-http://host.docker.internal:9100}
+      
+      # Application Settings
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=${LOG_FILE:-logs/e2e-worker.log}
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      # Playwright settings (use consistent path for caching)
+      - PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+      # Enable watch mode in development (auto-reload on file changes)
+      - WATCH_MODE=${WATCH_MODE:-true}
+    volumes:
+      # Mount source code (for development with auto-reload)
+      - .:/app
+      # Exclude venv and caches
+      - /app/venv
+      - /app/__pycache__
+      - /app/.pytest_cache
+      - /app/.mypy_cache
+      # Logs volume
+      - e2e_worker_logs:/app/logs
+      # Persist Playwright browser cache
+      - playwright_browsers:/root/.cache/ms-playwright
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Wait for API to complete migrations before starting worker
+      lead-api:
+        condition: service_healthy
+    networks:
+      - freelancehunt-backend-network
+    # Allow access to host services (for E2E tests to reach frontend on host)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    # Development: Run as root for easier file permissions with volume mounts
+    # Production: Uses non-root user defined in Dockerfile
+    user: root
+    healthcheck:
+      # Check if worker process is running
+      test: ["CMD", "pgrep", "-f", "run_e2e_worker.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
 # ===== Networks =====
 networks:
   freelancehunt-backend-network:
@@ -228,4 +299,10 @@ volumes:
   scheduler_logs:
     driver: local
     name: freelancehunt-scheduler-logs
+  e2e_worker_logs:
+    driver: local
+    name: freelancehunt-e2e-worker-logs
+  playwright_browsers:
+    driver: local
+    name: freelancehunt-playwright-browsers
 

@@ -102,10 +102,10 @@ class Settings(BaseSettings):
         
         Parses from string format (comma-separated or JSON).
         """
-        value = getattr(self, 'cors_origins_str', "http://localhost:9100,http://localhost:3000,http://localhost:9200,https://clienthunt.app,https://www.clienthunt.app,https://admin.clienthunt.app")
+        value = getattr(self, 'cors_origins_str', "http://localhost:9100,http://localhost:3000,http://localhost:9200,http://host.docker.internal:9100,https://clienthunt.app,https://www.clienthunt.app,https://admin.clienthunt.app")
         
         if not value or not isinstance(value, str):
-            return ["http://localhost:9100", "http://localhost:3000", "http://localhost:9200", "https://clienthunt.app", "https://www.clienthunt.app", "https://admin.clienthunt.app"]
+            return ["http://localhost:9100", "http://localhost:3000", "http://localhost:9200", "http://host.docker.internal:9100", "https://clienthunt.app", "https://www.clienthunt.app", "https://admin.clienthunt.app"]
         
         # Try JSON first
         try:
@@ -118,10 +118,10 @@ class Settings(BaseSettings):
         # Try comma-separated
         if "," in value:
             origins = [origin.strip() for origin in value.split(",") if origin.strip()]
-            return origins if origins else ["http://localhost:9100", "http://localhost:3000", "http://localhost:9200", "https://clienthunt.app", "https://www.clienthunt.app", "https://admin.clienthunt.app"]
+            return origins if origins else ["http://localhost:9100", "http://localhost:3000", "http://localhost:9200", "http://host.docker.internal:9100", "https://clienthunt.app", "https://www.clienthunt.app", "https://admin.clienthunt.app"]
         
         # Single value
-        return [value.strip()] if value.strip() else ["http://localhost:9100", "http://localhost:3000", "http://localhost:9200", "https://clienthunt.app", "https://www.clienthunt.app", "https://admin.clienthunt.app"]
+        return [value.strip()] if value.strip() else ["http://localhost:9100", "http://localhost:3000", "http://localhost:9200", "http://host.docker.internal:9100", "https://clienthunt.app", "https://www.clienthunt.app", "https://admin.clienthunt.app"]
     
     @model_validator(mode="before")
     @classmethod
@@ -144,7 +144,7 @@ class Settings(BaseSettings):
                 data["CORS_ORIGINS"] = ",".join(str(item) for item in cors_value)
             elif cors_value is None or cors_value == "":
                 # Empty value, use default
-                data["CORS_ORIGINS"] = "http://localhost:9100,http://localhost:3000,http://localhost:9200,https://clienthunt.app,https://www.clienthunt.app,https://admin.clienthunt.app"
+                data["CORS_ORIGINS"] = "http://localhost:9100,http://localhost:3000,http://localhost:9200,http://host.docker.internal:9100,https://clienthunt.app,https://www.clienthunt.app,https://admin.clienthunt.app"
             # If it's already a string, keep it as is (alias will map it)
         
         return data
