@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 import re
+import httpx
 
 from core.database import get_db
 from api.middleware.rate_limit import limiter
@@ -67,6 +68,54 @@ def detect_device_type(user_agent: Optional[str]) -> Optional[str]:
         return 'mobile'
     
     return 'desktop'
+
+
+async def get_country_from_ip(ip_address: Optional[str]) -> Optional[str]:
+    """
+    Get country code (ISO 3166-1 alpha-2) from IP address using ip-api.com.
+    
+    Uses free tier of ip-api.com (no API key required, 45 requests/minute limit).
+    Falls back gracefully if service is unavailable.
+    
+    Args:
+        ip_address: IP address to geolocate
+        
+    Returns:
+        ISO country code (2 letters, e.g., 'US', 'GB') or None if unavailable
+    """
+    if not ip_address:
+        return None
+    
+    # Skip local/private IPs
+    if ip_address in ['127.0.0.1', 'localhost', '::1'] or ip_address.startswith('192.168.') or ip_address.startswith('10.') or ip_address.startswith('172.'):
+        return None
+    
+    try:
+        # Use ip-api.com free tier (no API key required)
+        # Rate limit: 45 requests/minute
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(
+                f"http://ip-api.com/json/{ip_address}",
+                params={"fields": "countryCode,status"}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    country_code = data.get("countryCode")
+                    if country_code and len(country_code) == 2:
+                        return country_code.upper()
+            
+            logger.debug(f"Failed to get country for IP {ip_address}: {response.status_code}")
+            return None
+            
+    except httpx.TimeoutException:
+        logger.debug(f"Timeout getting country for IP {ip_address}")
+        return None
+    except Exception as e:
+        # Don't log errors for geolocation failures - it's not critical
+        logger.debug(f"Error getting country for IP {ip_address}: {str(e)}")
+        return None
 
 
 # Request Models
@@ -144,6 +193,9 @@ async def track_page_visit(
         # Detect device type
         device_type = detect_device_type(user_agent)
         
+        # Get country from IP address (non-blocking, fails gracefully)
+        country = await get_country_from_ip(ip_address)
+        
         # Create page visit record
         page_visit = PageVisit(
             page_path=page_path,
@@ -155,6 +207,7 @@ async def track_page_visit(
             utm_campaign=utm_campaign,
             session_id=visit_data.session_id[:100] if visit_data.session_id else None,
             device_type=device_type,
+            country=country,
         )
         
         db.add(page_visit)

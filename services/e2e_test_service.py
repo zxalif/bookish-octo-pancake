@@ -905,8 +905,9 @@ class E2ETestService:
                             await page.wait_for_timeout(1000)
                         
                         # Fill keyword search form
-                        await page.wait_for_selector('input[name="name"], input[placeholder*="name" i]', timeout=10000)
-                        await page.fill('input[name="name"], input[placeholder*="name" i]', "E2E Test Search")
+                        # Form uses id="name" not name="name"
+                        await page.wait_for_selector('input#name, input[name="name"], input[placeholder*="name" i]', timeout=10000)
+                        await page.fill('input#name, input[name="name"], input[placeholder*="name" i]', "E2E Test Search")
                         
                         # Add keywords
                         keyword_input = await page.query_selector('input[placeholder*="keyword" i], input[name="keywords"]')

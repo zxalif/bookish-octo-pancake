@@ -74,6 +74,17 @@ def ensure_playwright_installed():
         # Browser files exist, try to verify it works
         try:
             # Run async check in sync context
+            # Create new event loop to avoid RuntimeWarning
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If loop is already running, we can't use asyncio.run()
+                    # Just skip verification and assume it's installed
+                    logger.info("Playwright browsers appear to be installed (skipping verification in running loop)")
+                    return True
+            except RuntimeError:
+                pass  # No event loop, safe to use asyncio.run()
+            
             is_installed = asyncio.run(_check_browser_installed())
             if is_installed:
                 logger.info("Playwright browsers are installed and working")

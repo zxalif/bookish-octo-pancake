@@ -1313,6 +1313,7 @@ async def list_page_visits(
     utm_medium: Optional[str] = Query(None, description="Filter by UTM medium"),
     utm_campaign: Optional[str] = Query(None, description="Filter by UTM campaign"),
     device_type: Optional[str] = Query(None, description="Filter by device type"),
+    country: Optional[str] = Query(None, max_length=2, description="Filter by country code (ISO 3166-1 alpha-2)"),
     start_date: Optional[str] = Query(None, description="Start date (ISO format)"),
     end_date: Optional[str] = Query(None, description="End date (ISO format)"),
     search: Optional[str] = Query(None, max_length=100, description="Search in referrer or user agent"),
@@ -1332,6 +1333,7 @@ async def list_page_visits(
     - `utm_medium`: Filter by UTM medium
     - `utm_campaign`: Filter by UTM campaign
     - `device_type`: Filter by device type (mobile, tablet, desktop)
+    - `country`: Filter by country code (ISO 3166-1 alpha-2, e.g., 'US', 'GB')
     - `start_date`: Filter visits from this date (ISO format)
     - `end_date`: Filter visits until this date (ISO format)
     - `search`: Search in referrer or user agent (max 100 characters)
@@ -1364,6 +1366,12 @@ async def list_page_visits(
     if device_type:
         if device_type in ['mobile', 'tablet', 'desktop']:
             query = query.filter(PageVisit.device_type == device_type)
+    
+    if country:
+        # Sanitize country code (2 uppercase letters)
+        sanitized_country = ''.join(c for c in country[:2].upper() if c.isalpha())
+        if sanitized_country and len(sanitized_country) == 2:
+            query = query.filter(PageVisit.country == sanitized_country)
     
     if start_date:
         try:

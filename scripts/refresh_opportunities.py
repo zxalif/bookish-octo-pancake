@@ -176,23 +176,40 @@ async def refresh_for_user(
                 
                 logger.info(f"Fetched {len(leads)} leads from Rixly for search {search.name}")
                 
-                # Get existing opportunity source_post_ids to avoid duplicates
+                # Extract source_post_ids from leads (batch check is more efficient)
                 # Note: source_post_id stores the Rixly lead ID (source_id from Rixly API)
+                source_post_ids = []
+                valid_leads = []
+                
+                for lead in leads:
+                    source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
+                    if not source_post_id:
+                        logger.warning(f"Skipping lead without source_id: {lead.get('title', 'Unknown')}")
+                        continue
+                    source_post_ids.append(source_post_id)
+                    valid_leads.append((source_post_id, lead))
+                
+                # Batch check for existing opportunities (more efficient than checking one-by-one)
+                # IMPORTANT: Check by user_id, not just keyword_search_id, because UniqueConstraint
+                # is on (user_id, source_post_id) - same lead can't exist twice for same user
                 from models.opportunity import Opportunity
-                existing_source_ids = {
-                    opp.source_post_id
-                    for opp in db.query(Opportunity).filter(
-                        Opportunity.keyword_search_id == search.id
+                from sqlalchemy.exc import IntegrityError
+                
+                existing_source_ids = set()
+                if source_post_ids:
+                    existing = db.query(Opportunity.source_post_id).filter(
+                        Opportunity.user_id == user.id,
+                        Opportunity.source_post_id.in_(source_post_ids)
                     ).all()
-                }
+                    existing_source_ids = {row[0] for row in existing}
+                    logger.info(
+                        f"Found {len(existing_source_ids)} existing opportunities out of {len(source_post_ids)} leads"
+                    )
                 
                 # Process new leads
                 new_count = 0
-                for lead in leads:
-                    # Get source_post_id from lead (this is what's stored in Opportunity.source_post_id)
-                    source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
-                    
-                    if not source_post_id or source_post_id in existing_source_ids:
+                for source_post_id, lead in valid_leads:
+                    if source_post_id in existing_source_ids:
                         continue
                     
                     # Convert lead to opportunity
@@ -205,8 +222,14 @@ async def refresh_for_user(
                         db.add(opportunity)
                         new_count += 1
                         total_new_opportunities += 1
+                    except IntegrityError as e:
+                        # Handle database constraint violation (duplicate)
+                        db.rollback()
+                        logger.warning(f"Duplicate opportunity detected (constraint violation): {source_post_id}")
+                        continue
                     except Exception as e:
                         logger.error(f"Error converting lead to opportunity: {str(e)}")
+                        db.rollback()
                         continue
                 
                 if new_count > 0:
@@ -310,23 +333,39 @@ async def refresh_for_search(search_id: str) -> dict:
         
         logger.info(f"Fetched {len(leads)} leads from Rixly")
         
-        # Get existing opportunity source_post_ids to avoid duplicates
-        # Note: source_post_id stores the Rixly lead ID (source_id from Rixly API)
+        # Extract source_post_ids from leads (batch check is more efficient)
+        source_post_ids = []
+        valid_leads = []
+        
+        for lead in leads:
+            source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
+            if not source_post_id:
+                logger.warning(f"Skipping lead without source_id: {lead.get('title', 'Unknown')}")
+                continue
+            source_post_ids.append(source_post_id)
+            valid_leads.append((source_post_id, lead))
+        
+        # Batch check for existing opportunities (more efficient than checking one-by-one)
+        # IMPORTANT: Check by user_id, not just keyword_search_id, because UniqueConstraint
+        # is on (user_id, source_post_id) - same lead can't exist twice for same user
         from models.opportunity import Opportunity
-        existing_source_ids = {
-            opp.source_post_id
-            for opp in db.query(Opportunity).filter(
-                Opportunity.keyword_search_id == search.id
+        from sqlalchemy.exc import IntegrityError
+        
+        existing_source_ids = set()
+        if source_post_ids:
+            existing = db.query(Opportunity.source_post_id).filter(
+                Opportunity.user_id == user.id,
+                Opportunity.source_post_id.in_(source_post_ids)
             ).all()
-        }
+            existing_source_ids = {row[0] for row in existing}
+            logger.info(
+                f"Found {len(existing_source_ids)} existing opportunities out of {len(source_post_ids)} leads"
+            )
         
         # Process new leads
         new_count = 0
-        for lead in leads:
-            # Get source_post_id from lead (this is what's stored in Opportunity.source_post_id)
-            source_post_id = lead.get("source_id") or lead.get("source_post_id") or lead.get("id", "")
-            
-            if not source_post_id or source_post_id in existing_source_ids:
+        for source_post_id, lead in valid_leads:
+            if source_post_id in existing_source_ids:
                 continue
             
             try:
@@ -337,8 +376,14 @@ async def refresh_for_search(search_id: str) -> dict:
                 )
                 db.add(opportunity)
                 new_count += 1
+            except IntegrityError as e:
+                # Handle database constraint violation (duplicate)
+                db.rollback()
+                logger.warning(f"Duplicate opportunity detected (constraint violation): {source_post_id}")
+                continue
             except Exception as e:
                 logger.error(f"Error converting lead to opportunity: {str(e)}")
+                db.rollback()
                 continue
         
         if new_count > 0:
